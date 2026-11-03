@@ -15,13 +15,18 @@ import core.network.UdpGatewayServer;
 import core.plugin.PluginManager;
 import core.schema.SchemaManager;
 import core.schema.SchemaSet;
+import io.netty.buffer.PooledByteBufAllocator;
+import io.netty.buffer.PooledByteBufAllocatorMetric;
 import io.netty.channel.EventLoopGroup;
+import io.netty.channel.MultithreadEventLoopGroup;
 import io.netty.channel.nio.NioEventLoopGroup;
 import io.netty.util.concurrent.DefaultThreadFactory;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 import java.io.IOException;
+import java.lang.management.ManagementFactory;
+import java.lang.management.MemoryUsage;
 import java.nio.file.Path;
 import java.time.Duration;
 import java.util.Objects;
@@ -51,7 +56,7 @@ import java.util.concurrent.atomic.AtomicBoolean;
 public final class ServerEngine implements AutoCloseable {
 
     public static final String NAME = "netcore-emulator";
-    public static final String VERSION = "2.0.0";
+    public static final String VERSION = "2.0.1";
 
     private static final Logger log = LoggerFactory.getLogger(ServerEngine.class);
     private static final String BANNER = NAME + " engine v" + VERSION;
@@ -144,6 +149,9 @@ public final class ServerEngine implements AutoCloseable {
             int workers = cfg.engine().workerThreads();
             bossGroup = new NioEventLoopGroup(1, threadFactory("engine-boss"));
             workerGroup = new NioEventLoopGroup(workers, threadFactory("engine-worker"));
+            log.info("event loops allocated: boss={}, workers={} (engine.workerThreads={}, {} cores)",
+                    loopCount(bossGroup), loopCount(workerGroup), workers == 0 ? "0=auto" : String.valueOf(workers),
+                    Runtime.getRuntime().availableProcessors());
             tcpServer = new TcpDispatchServer(bossGroup, workerGroup, configManager.supplier(), sessions, dispatcher, metrics);
             udpServer = new UdpGatewayServer(workerGroup, configManager.supplier(), sessions, dispatcher, metrics);
             if (cfg.network().dispatch().enabled()) {
@@ -536,7 +544,7 @@ public final class ServerEngine implements AutoCloseable {
                 new EngineStatus.ListenerStatus(cfg.admin().enabled(), admin != null && admin.isRunning(), adminPort()),
                 new EngineStatus.SessionCounts(sessions.activeCount(), sessions.count(Protocol.TCP),
                         sessions.count(Protocol.UDP), sessions.loopbackCount()),
-                metrics.snapshot(), tickScheduler.stats(), registry.size(),
+                metrics.snapshot(), tickScheduler.stats(), jvmStatus(), registry.size(),
                 new EngineStatus.SchemaStatus(cfg.schemas().enabled(), schemaManager.isWatching(),
                         schemaManager.directory().toString(), set.packets().size(), set.structs().size(),
                         set.rules().size(), schemaManager.packetsHandled(), schemaManager.responsesSent()),
@@ -580,6 +588,15 @@ public final class ServerEngine implements AutoCloseable {
                 .append(", last=").append(t.lastTickMicros()).append("us, avg=").append(t.averageTickMicros())
                 .append("us, max=").append(t.maxTickMicros()).append("us, overruns=").append(t.overruns())
                 .append(", tickables=").append(t.tickables()).append(nl);
+        EngineStatus.JvmStatus j = s.jvm();
+        sb.append("  jvm memory    : heap ").append(mib(j.heapUsedBytes())).append(" used / ")
+                .append(mib(j.heapCommittedBytes())).append(" committed / ").append(mib(j.heapMaxBytes()))
+                .append(" max, non-heap ").append(mib(j.nonHeapUsedBytes()))
+                .append(", netty direct ").append(mib(j.nettyDirectBytes()))
+                .append(", netty heap ").append(mib(j.nettyHeapBytes())).append(nl);
+        sb.append("  threads       : ").append(j.threadCount()).append(" total; event loops boss=")
+                .append(j.bossLoops()).append(", workers=").append(j.workerLoops())
+                .append(" (").append(j.availableProcessors()).append(" cores)").append(nl);
         sb.append("  registry      : ").append(s.registeredOpcodes()).append(" opcode(s)").append(nl);
         sb.append("  schemas       : ").append(s.schemas().enabled() ? "" : "disabled; ")
                 .append(s.schemas().packets()).append(" packet(s), ").append(s.schemas().structs())
@@ -601,6 +618,24 @@ public final class ServerEngine implements AutoCloseable {
                     .append(" [").append(p.state()).append("] from ").append(p.source());
         }
         return sb.toString();
+    }
+
+    private EngineStatus.JvmStatus jvmStatus() {
+        MemoryUsage heap = ManagementFactory.getMemoryMXBean().getHeapMemoryUsage();
+        MemoryUsage nonHeap = ManagementFactory.getMemoryMXBean().getNonHeapMemoryUsage();
+        PooledByteBufAllocatorMetric netty = PooledByteBufAllocator.DEFAULT.metric();
+        return new EngineStatus.JvmStatus(heap.getUsed(), heap.getCommitted(), heap.getMax(), nonHeap.getUsed(),
+                netty.usedDirectMemory(), netty.usedHeapMemory(),
+                ManagementFactory.getThreadMXBean().getThreadCount(), Runtime.getRuntime().availableProcessors(),
+                loopCount(bossGroup), loopCount(workerGroup));
+    }
+
+    private static int loopCount(EventLoopGroup group) {
+        return group instanceof MultithreadEventLoopGroup multi ? multi.executorCount() : 0;
+    }
+
+    private static String mib(long bytes) {
+        return bytes < 0 ? "n/a" : String.format("%.1f MiB", bytes / 1048576.0);
     }
 
     private String listenerSummary() {

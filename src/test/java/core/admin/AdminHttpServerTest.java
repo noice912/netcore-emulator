@@ -19,6 +19,7 @@ import java.nio.file.Path;
 import java.util.concurrent.TimeUnit;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 @Timeout(value = 30, unit = TimeUnit.SECONDS)
@@ -145,5 +146,39 @@ class AdminHttpServerTest {
         HttpResponse<String> r = post("/broadcast?text=hello%20all");
         assertEquals(200, r.statusCode());
         assertTrue(r.body().contains("\"sent\": 0"), r.body());
+    }
+
+    @Test
+    void statusAndPrometheusExposeJvmAndEventLoopMetrics() throws Exception {
+        String status = get("/status").body();
+        assertTrue(status.contains("\"jvm\""), status);
+        assertTrue(status.contains("\"workerLoops\""), status);
+        assertTrue(status.contains("\"heapUsedBytes\""), status);
+
+        String prom = get("/metrics/prometheus").body();
+        assertTrue(prom.contains("netcore_jvm_heap_used_bytes "), prom);
+        assertTrue(prom.contains("netcore_jvm_heap_max_bytes "), prom);
+        assertTrue(prom.contains("netcore_netty_direct_memory_bytes "), prom);
+        assertTrue(prom.contains("netcore_event_loops_boss 1\n"), prom);
+        assertTrue(prom.contains("netcore_jvm_threads "), prom);
+
+        var jvm = engine.statusSnapshot().jvm();
+        assertEquals(1, jvm.bossLoops());
+        assertTrue(jvm.workerLoops() > 0);
+        assertTrue(jvm.heapUsedBytes() > 0);
+        assertTrue(jvm.threadCount() > jvm.workerLoops());
+    }
+
+    @Test
+    void shutdownEndpointStopsTheEngine() throws Exception {
+        HttpResponse<String> r = post("/shutdown");
+        assertEquals(200, r.statusCode());
+        assertTrue(r.body().contains("\"stopping\": true"), r.body());
+        long deadline = System.currentTimeMillis() + 10_000;
+        while (engine.isRunning() && System.currentTimeMillis() < deadline) {
+            Thread.sleep(50);
+        }
+        assertFalse(engine.isRunning(), "engine should stop after POST /shutdown");
+        assertEquals(-1, engine.adminPort());
     }
 }

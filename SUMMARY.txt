@@ -1,13 +1,14 @@
 NETCORE-EMULATOR  -  PROJECT SUMMARY
 =====================================
 
-Version   : 2.0.0 (heavyweight)        Built : 2026-11-03
+Version   : 2.0.1 (heavyweight + launch tooling)   Built : 2026-11-03
 Language  : Java 17                    Build : Gradle 9.6 via bundled wrapper (gradlew / gradlew.bat)
 Libraries : Netty 4.1.140 (NIO event loops), Gson 2.13.1 (JSON), SLF4J 2.0 + Logback 1.5 (logging),
             JUnit 5.14 (tests). Nothing from any existing game-server framework.
 Location  : C:\Users\Joshu\.claude\code\CustomEmulator   (Gradle project / distribution name: netcore-emulator)
 GitHub    : https://github.com/noice912/netcore-emulator
-Code size : 65 main classes (~7,700 lines), 22 test sources (~2,600 lines), 137 tests in 19 test classes, all passing.
+Code size : 66 main classes (~8,000 lines), 23 test sources (~2,800 lines), 148 tests in 20 test classes, all passing.
+Tooling   : tools/start_checked.ps1, tools/parse_metrics.ps1, tools/upgrade_build.ps1, tools/launch_client_sandbox.bat
 
 
 1. WHAT IT IS
@@ -192,6 +193,11 @@ Templates: constants of any JSON type, "${request.<dotted.path>}", "${session.id
 Editing a file re-registers packets within schemas.debounceMillis. A broken file is rejected with
 every problem listed and the previous packets stay registered. Java code hooks in with
 engine.schemas().addListener(...) and engine.schemas().build("Name").set(...).
+Response-rule templates are validated at load time: every ${request.path} must resolve to a field
+of the "on" packet (structs and array indexes are walked), other references must be known,
+type-preserving placeholders must be compatible with the target field, mixed text may only fill a
+string field, and constants must coerce. core.tools.SchemaCheck / `gradlew checkSchemas` runs the
+same validation from a pipeline and is part of `gradlew check`.
 schemas/example.json ships a sample protocol (HelloRequest/Response, MoveRequest/Ack,
 InventoryRequest/Response) with three response rules.
 
@@ -205,11 +211,17 @@ tick, save, capture on|off, broadcast <text> (ECHO to every open session), kick 
 Admin API (http://127.0.0.1:22180 by default, unauthenticated, loopback-only unless allowRemote):
   GET  /              endpoint index
   GET  /status        EngineStatus JSON        GET /metrics  counters JSON
-  GET  /metrics/prometheus   text exposition (netcore_* gauges/counters)
+  GET  /metrics/prometheus   text exposition (netcore_* gauges/counters, incl. JVM heap/non-heap,
+                             Netty direct/heap buffer bytes, threads, cores, boss/worker loops)
   GET  /sessions /config /schemas /plugins /tick /memory
-  POST /reload  /schemas/reload  /save  /capture/start  /capture/stop
+  POST /reload  /schemas/reload  /save  /capture/start  /capture/stop  /shutdown
   POST /sessions/{id}/kick?reason=...   POST /broadcast?text=...
   405 with Allow header for other methods, 404 for unknown paths, 409 when persistence is off.
+
+Operations scripts (tools/): start_checked.ps1 (pre-flight ports, schema check, detached launch,
+readiness, binding + event-loop verification, log audit, report), parse_metrics.ps1 (two scrapes,
+deltas, flags), upgrade_build.ps1 (protected-commit safe migration with backup branch/tag),
+launch_client_sandbox.bat (client launch confined to the isolated asset sandbox).
 
 Capture: captures/capture-<UTC timestamp>.log, one line per frame:
   <ISO time> IN|OUT #<session> <TCP|UDP> <remote> op=0x.... len=N hex=<first maxBytesPerFrame bytes>
@@ -262,7 +274,7 @@ schema directory/enablement, capture directory. Idle timeouts apply to new conne
 A reload that fails validation leaves the running configuration untouched.
 
 
-12. TEST SUITE (137 tests, 19 classes, all passing)
+12. TEST SUITE (148 tests, 20 classes, all passing)
 ---------------------------------------------------
 core.network   FrameCodecTest (7), SessionManagerTest (9), TokenBucketTest (4), PacketRecorderTest (3)
 core.handlers  PacketRegistryTest (7), PacketDispatcherTest (13: handled/echo/unknown/malformed/null/
@@ -270,10 +282,12 @@ core.handlers  PacketRegistryTest (7), PacketDispatcherTest (13: handled/echo/un
                rate limit/rate limit disabled)
 core.engine    EngineConfigTest (14), ConfigManagerTest (6 incl. live file-watcher reload),
                MemoryStoreTest (9), TickSchedulerTest (6), PersistentStoreTest (7)
-core.schema    SchemaPacketTest (7, every field type round-trips), SchemaLoaderTest (10),
-               SchemaManagerTest (9), TemplateEvaluatorTest (6)
-core.admin     AdminHttpServerTest (8, real HTTP client against a live engine)
+core.schema    SchemaPacketTest (7, every field type round-trips), SchemaLoaderTest (15, incl.
+               template path/type validation), SchemaManagerTest (9), TemplateEvaluatorTest (6)
+core.admin     AdminHttpServerTest (10, real HTTP client against a live engine incl. JVM metrics
+               and /shutdown)
 core.plugin    PluginManagerTest (3, classpath plugin through the full lifecycle)
+core.tools     SchemaCheckTest (4, incl. validating the shipped schemas/example.json)
 core.integration LoopbackIntegrationTest (6: TCP echo/ping/disconnect, UDP echo, encrypted TCP,
                status), SchemaIntegrationTest (3: rule-driven reply over TCP, struct round trip
                over UDP, hot reload of a schema file)
@@ -308,7 +322,12 @@ Integration tests bind real sockets on 127.0.0.1 ephemeral ports; Netty leak det
        Committed as 672844d and pushed to github.com/noice912/netcore-emulator.
 2.0.0  Heavyweight: JSON schema packets + response rules + templates, tick loop, persistence,
        rate limiting, packet capture, admin HTTP API with Prometheus metrics, plugin loader,
-       broadcast/kick, structured status, expanded console, 137 tests. (This working tree.)
+       broadcast/kick, structured status, expanded console, 137 tests. Commit 3ecf03f, pushed.
+2.0.1  Launch tooling: JVM/Netty memory + event-loop telemetry in /status and the Prometheus
+       exposition, POST /shutdown, load-time validation of every response-rule template
+       (request paths, known references, type compatibility, constants), core.tools.SchemaCheck
+       + `gradlew checkSchemas` (part of `check`), tools/ scripts for checked start-up, metrics
+       parsing, safe upgrades and the client sandbox launcher, 148 tests. (This working tree.)
 
 
 15. FILE INVENTORY

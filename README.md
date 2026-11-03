@@ -103,6 +103,21 @@ after the reply. Java code can also react to schema packets through
 
 Schema packets never override an opcode a Java handler already owns.
 
+Every response rule is validated when the schema loads, not when a packet arrives: each
+`${request.<path>}` must resolve to a field of the `on` packet (walking structs and array indexes),
+every other reference must be one the evaluator knows, a type-preserving placeholder must be
+compatible with its target field (struct to the same struct, array to the same element type, scalars
+to scalars), mixed text may only fill a string field, and constants must coerce to the field's
+type. A rule that fails any of these is reported with every other problem and the file is rejected,
+so an unresolvable template can never reach a live handler.
+
+Validate from a pipeline without starting the engine:
+
+```bash
+./gradlew checkSchemas                      # ./schemas, also runs as part of ./gradlew check
+java -cp "build/install/netcore-emulator/lib/*" core.tools.SchemaCheck schemas other.json
+```
+
 ## Adding a packet in Java
 
 1. Extend `BasePacket`, implement `decode`/`encode` with the guarded `read*`/`write*` helpers, and
@@ -145,9 +160,26 @@ Admin HTTP API (`admin.enabled`, default `http://127.0.0.1:22180`, loopback only
 
 ```
 GET  /status /metrics /metrics/prometheus /sessions /config /schemas /plugins /tick /memory
-POST /reload /schemas/reload /save /capture/start /capture/stop
+POST /reload /schemas/reload /save /capture/start /capture/stop /shutdown
 POST /sessions/{id}/kick?reason=...   POST /broadcast?text=...
 ```
+
+`/status` and the Prometheus exposition include process telemetry: JVM heap used/committed/max,
+non-heap, Netty pooled direct and heap buffer memory, live thread count, CPU cores, and the Netty
+event-loop allocation (`netcore_event_loops_boss`, `netcore_event_loops_worker`). Worker loops are
+allocated up front (2 x cores unless `engine.workerThreads` is set) but their threads start lazily
+on first use, so a thread dump of an idle engine shows fewer `engine-worker` threads than loops.
+
+## Operations scripts (`tools/`)
+
+| Script | What it does |
+|--------|--------------|
+| `start_checked.ps1` | Pre-flight port collision scan (names the owning process), builds the distribution if missing, validates `schemas/`, starts the engine detached with logs under `logs/`, waits for readiness, verifies every listener through `/status` *and* the OS socket table, audits the start-up log and the event-loop allocation, writes `logs/start_checked-<stamp>.txt`. Exit codes: 0 healthy, 2 collision, 3 not ready, 4 listener missing, 5 schema check failed, 6 build failed. `-StopAfterCheck` shuts the engine down again via `/shutdown`. |
+| `parse_metrics.ps1` | Scrapes `/metrics/prometheus` twice (`-IntervalSeconds`) and reports memory, sessions, rate-limit violation deltas, tick latency and drop/exhaustion indicators, with flags for drops, tick overruns, buffer and heap pressure. `-Json` for machines, `-FailOnFlags` as a pipeline gate. |
+| `upgrade_build.ps1` | Safe migration to a new version: refuses a dirty tree (or `-AutoStash`), verifies a `-ProtectCommit` exists and stays reachable before and after the integration, creates `backup/pre-upgrade-<stamp>` and a tag, merges `--no-ff` (rebase only with `-AllowRewrite`), builds, and can `-RollbackOnBuildFailure`. |
+| `launch_client_sandbox.bat` | Starts a trimmed game client from an isolated asset sandbox (default `C:\Genshin_Isolated_Sandbox_7.1`), optionally junction-linking an external workspace into it, and refuses any executable outside the sandbox or inside a live launcher installation. `--require-engine` gates on the admin API, `--verify-size` on the expected trimmed size, `--dry-run` prints the plan only. |
+
+All scripts are Windows PowerShell 5.1 / cmd.exe compatible and run from any working directory.
 
 Packet capture (`capture on`, or `capture.enabled`) writes every inbound and outbound frame to
 `captures/capture-<timestamp>.log` as timestamped hex lines: the raw material for writing schemas
@@ -210,6 +242,7 @@ apply live. Settings that need a restart are logged as such.
 ## Mapping a protocol
 
 1. Point a client at the engine with `capture on`; every frame lands in `captures/` as hex.
-2. Describe what you see as packets in `schemas/*.json`; the file reloads as you edit.
+2. Describe what you see as packets in `schemas/*.json`; the file reloads as you edit, and
+   `./gradlew checkSchemas` tells you about every problem at once.
 3. Add response rules for the replies the client expects, using `${request.*}` to echo fields.
 4. When a packet needs real logic, add a `SchemaListener` or a Java handler in a plugin.

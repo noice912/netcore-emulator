@@ -8,7 +8,7 @@ import java.util.List;
 public record EngineStatus(String name, String version, boolean running, long uptimeMillis, String configPath,
                            boolean configWatching, ListenerStatus dispatch, ListenerStatus gateway,
                            ListenerStatus admin, SessionCounts sessions, EngineMetrics.Snapshot metrics,
-                           TickScheduler.Stats tick, int registeredOpcodes, SchemaStatus schemas,
+                           TickScheduler.Stats tick, JvmStatus jvm, int registeredOpcodes, SchemaStatus schemas,
                            CaptureStatus capture, MemoryStatus memory, PersistenceStatus persistence,
                            List<PluginManager.PluginInfo> plugins) {
 
@@ -16,6 +16,12 @@ public record EngineStatus(String name, String version, boolean running, long up
     }
 
     public record SessionCounts(int total, int tcp, int udp, int loopback) {
+    }
+
+    /** Process-level resource usage and the Netty event-loop allocation. */
+    public record JvmStatus(long heapUsedBytes, long heapCommittedBytes, long heapMaxBytes, long nonHeapUsedBytes,
+                            long nettyDirectBytes, long nettyHeapBytes, int threadCount, int availableProcessors,
+                            int bossLoops, int workerLoops) {
     }
 
     public record SchemaStatus(boolean enabled, boolean watching, String directory, int packets, int structs,

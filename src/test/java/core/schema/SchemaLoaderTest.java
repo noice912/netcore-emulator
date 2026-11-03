@@ -133,4 +133,86 @@ class SchemaLoaderTest {
         assertThrows(SchemaException.class, () -> SchemaLoader.parse("   ", "f"));
         assertThrows(SchemaException.class, () -> SchemaLoader.parse("[1,2]", "f"));
     }
+
+    // ---- template validation --------------------------------------------------------------------
+
+    static final String TEMPLATE_SCHEMA_HEAD = """
+            { "structs": { "Vec3": [ {"name":"x","type":"f32"}, {"name":"y","type":"f32"} ],
+                           "Item": [ {"name":"id","type":"u32"} ] },
+              "packets": [
+                { "name": "Req", "opcode": 256, "fields": [
+                    {"name":"name","type":"string"}, {"name":"count","type":"u16"},
+                    {"name":"pos","type":"struct","struct":"Vec3"},
+                    {"name":"items","type":"array","element":"struct","struct":"Item"} ] },
+                { "name": "Rsp", "opcode": 257, "fields": [
+                    {"name":"greeting","type":"string"}, {"name":"count","type":"u16"},
+                    {"name":"pos","type":"struct","struct":"Vec3"}, {"name":"firstId","type":"u32"},
+                    {"name":"ok","type":"bool"}, {"name":"items","type":"array","element":"struct","struct":"Item"} ] } ],
+              "responses": [ { "on": "Req", "send": "Rsp", "fields":
+            """;
+
+    private static String rule(String fields) {
+        return TEMPLATE_SCHEMA_HEAD + fields + " } ] }";
+    }
+
+    @Test
+    void validTemplatePathsAndTypesPass() throws SchemaException {
+        SchemaSet set = SchemaLoader.parse(rule("""
+                { "greeting": "hi ${request.name} #${request.count} at ${now.iso}", "count": "${request.count}",
+                  "pos": "${request.pos}", "firstId": "${request.items.0.id}", "ok": true,
+                  "items": "${request.items}" }"""), "ok.json");
+        assertEquals(1, set.rules().size());
+        assertEquals(6, set.rules().get(0).templates().size());
+    }
+
+    @Test
+    void nestedConstantsAreValidatedFieldByField() throws SchemaException {
+        SchemaSet set = SchemaLoader.parse(rule("""
+                { "pos": { "x": 1.5, "y": "${request.count}" }, "items": [ { "id": 7 }, { "id": "${request.count}" } ] }"""),
+                "ok.json");
+        assertEquals(2, set.rules().get(0).templates().size());
+
+        SchemaException e = assertThrows(SchemaException.class, () -> SchemaLoader.parse(rule("""
+                { "pos": { "x": 1.5, "z": 2 }, "items": [ { "id": "not a number" } ] }"""), "bad.json"));
+        assertTrue(e.getMessage().contains("struct Vec3 has no field 'z'"), e.getMessage());
+        assertTrue(e.getMessage().contains("constant for field 'id' is not valid"), e.getMessage());
+    }
+
+    @Test
+    void unresolvableRequestPathsAreRejectedAtLoadTime() {
+        SchemaException e = assertThrows(SchemaException.class, () -> SchemaLoader.parse(rule("""
+                { "greeting": "${request.nope}", "count": "${request.pos.z}", "firstId": "${request.items.id}" }"""),
+                "bad.json"));
+        String m = e.getMessage();
+        assertTrue(m.contains("'${request.nope}' does not resolve"), m);
+        assertTrue(m.contains("'${request.pos.z}' does not resolve"), m);
+        assertTrue(m.contains("'${request.items.id}' does not resolve"), m);
+    }
+
+    @Test
+    void unknownReferencesAndTypeMismatchesAreRejected() {
+        SchemaException e = assertThrows(SchemaException.class, () -> SchemaLoader.parse(rule("""
+                { "greeting": "${server.name}", "count": "${request.pos}", "pos": "${request.count}",
+                  "firstId": "id=${request.count}", "ok": "maybe", "items": "${request.pos}" }"""), "bad.json"));
+        String m = e.getMessage();
+        assertTrue(m.contains("unknown template reference '${server.name}'"), m);
+        assertTrue(m.contains("'${request.pos}' is struct Vec3 but field 'count' is u16"), m);
+        assertTrue(m.contains("'${request.count}' is u16 but field 'pos' is struct Vec3"), m);
+        assertTrue(m.contains("field 'firstId' is u32 but the template"), m);
+        assertTrue(m.contains("constant for field 'ok' is not valid"), m);
+        assertTrue(m.contains("field 'items' is array of struct Item"), m);
+    }
+
+    @Test
+    void resolvePathWalksStructsAndArrays() throws SchemaException {
+        SchemaSet set = SchemaLoader.parse(TEMPLATE_SCHEMA_HEAD + "{} } ] }", "t.json");
+        var fields = set.packet("Req").orElseThrow().fields();
+        assertEquals(FieldType.F32, SchemaLoader.resolvePath("pos.x", fields, set).type());
+        assertEquals(FieldType.U32, SchemaLoader.resolvePath("items.3.id", fields, set).type());
+        assertEquals(FieldType.ARRAY, SchemaLoader.resolvePath("items", fields, set).type());
+        assertEquals(FieldType.STRUCT, SchemaLoader.resolvePath("items.0", fields, set).type());
+        assertEquals(null, SchemaLoader.resolvePath("items.x.id", fields, set));
+        assertEquals(null, SchemaLoader.resolvePath("name.length", fields, set));
+        assertEquals(null, SchemaLoader.resolvePath("", fields, set));
+    }
 }

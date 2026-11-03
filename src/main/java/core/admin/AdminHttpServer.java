@@ -50,6 +50,7 @@ import java.util.regex.Pattern;
  * POST /reload                re-read config.json      POST /schemas/reload
  * POST /save                  flush persistence        POST /capture/start | /capture/stop
  * POST /sessions/{id}/kick?reason=...                  POST /broadcast?text=...
+ * POST /shutdown              stop the engine (answers, then stops on another thread)
  * </pre>
  */
 public final class AdminHttpServer implements AutoCloseable {
@@ -196,6 +197,13 @@ public final class AdminHttpServer implements AutoCloseable {
                 engine.recorder().stop();
                 sendJson(exchange, 200, Map.of("recording", false, "frames", engine.recorder().framesRecorded()));
             }
+            case "/shutdown" -> {
+                // Answer first, then stop on another thread: stop() tears this server down too.
+                sendJson(exchange, 200, Map.of("stopping", true));
+                Thread stopper = new Thread(engine::stop, "admin-shutdown");
+                stopper.setDaemon(false);
+                stopper.start();
+            }
             case "/broadcast" -> {
                 String text = query.get("text");
                 if (text == null || text.isBlank()) {
@@ -298,6 +306,18 @@ public final class AdminHttpServer implements AutoCloseable {
         line(sb, "netcore_schema_responses_sent_total", s.schemas().responsesSent());
         line(sb, "netcore_memory_entries", s.memory().entries());
         line(sb, "netcore_capture_frames_total", s.capture().frames());
+        line(sb, "netcore_sessions_loopback", s.sessions().loopback());
+        EngineStatus.JvmStatus j = s.jvm();
+        line(sb, "netcore_jvm_heap_used_bytes", j.heapUsedBytes());
+        line(sb, "netcore_jvm_heap_committed_bytes", j.heapCommittedBytes());
+        line(sb, "netcore_jvm_heap_max_bytes", j.heapMaxBytes());
+        line(sb, "netcore_jvm_nonheap_used_bytes", j.nonHeapUsedBytes());
+        line(sb, "netcore_netty_direct_memory_bytes", j.nettyDirectBytes());
+        line(sb, "netcore_netty_heap_memory_bytes", j.nettyHeapBytes());
+        line(sb, "netcore_jvm_threads", j.threadCount());
+        line(sb, "netcore_cpu_cores", j.availableProcessors());
+        line(sb, "netcore_event_loops_boss", j.bossLoops());
+        line(sb, "netcore_event_loops_worker", j.workerLoops());
         return sb.toString();
     }
 
@@ -308,7 +328,7 @@ public final class AdminHttpServer implements AutoCloseable {
     private static String index() {
         return "netcore-emulator admin API\n"
                 + "GET  /status /metrics /metrics/prometheus /sessions /config /schemas /plugins /tick /memory\n"
-                + "POST /reload /schemas/reload /save /capture/start /capture/stop\n"
+                + "POST /reload /schemas/reload /save /capture/start /capture/stop /shutdown\n"
                 + "POST /sessions/{id}/kick?reason=... /broadcast?text=...\n";
     }
 

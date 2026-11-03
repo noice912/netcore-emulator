@@ -19,6 +19,7 @@ import java.util.HashSet;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Objects;
 import java.util.Set;
 import java.util.stream.Stream;
 
@@ -41,7 +42,12 @@ import java.util.stream.Stream;
  * }
  * }</pre>
  *
- * All files in a directory are merged into one set; names and opcodes must be unique across them.
+ * <p>Validation is structural (unique names and opcodes, reserved range, field types, struct
+ * references, cycles) and then semantic for every response rule: each {@code ${request.*}} path
+ * must resolve to a field of the {@code on} packet, each other reference must be one the
+ * {@link TemplateEvaluator} knows, a type-preserving placeholder must be compatible with the target
+ * field, mixed text may only feed a string field, and every constant must coerce to its field's
+ * type. All files in a directory are merged into one set; every problem is reported in one message.
  */
 public final class SchemaLoader {
 
@@ -208,6 +214,8 @@ public final class SchemaLoader {
             checkStructReferences(packet.fields(), structs, "packet '" + packet.name() + "'", problems);
         }
         detectCycles(structs, problems);
+        boolean structurallySound = problems.isEmpty();
+        SchemaSet probe = new SchemaSet(structs, packets, List.of(), sources);
 
         List<ResponseRule> rules = new ArrayList<>();
         Map<String, PacketDef> byName = new HashMap<>();
@@ -221,8 +229,10 @@ public final class SchemaLoader {
             for (ResponseDto dto : file.responses) {
                 String on = dto.on == null ? "" : dto.on.trim();
                 String send = dto.send == null ? "" : dto.send.trim();
+                String context = source + ": response rule " + on + " -> " + send;
                 boolean ok = true;
-                if (!byName.containsKey(on)) {
+                PacketDef sourcePacket = byName.get(on);
+                if (sourcePacket == null) {
                     problems.add(source + ": response rule 'on' references unknown packet '" + on + "'");
                     ok = false;
                 }
@@ -235,12 +245,18 @@ public final class SchemaLoader {
                 if (dto.fields != null && target != null) {
                     for (Map.Entry<String, JsonElement> entry : dto.fields.entrySet()) {
                         if (target.field(entry.getKey()).isEmpty()) {
-                            problems.add(source + ": response rule " + on + " -> " + send + " sets unknown field '"
-                                    + entry.getKey() + "'");
+                            problems.add(context + " sets unknown field '" + entry.getKey() + "'");
                             ok = false;
                             continue;
                         }
                         templates.put(entry.getKey(), SchemaValues.fromJson(entry.getValue()));
+                    }
+                }
+                if (ok && structurallySound) {
+                    for (Map.Entry<String, Object> template : templates.entrySet()) {
+                        FieldDef targetField = target.field(template.getKey()).orElseThrow();
+                        validateTemplate(template.getValue(), targetField, sourcePacket, probe,
+                                context + ", field '" + template.getKey() + "'", problems);
                     }
                 }
                 if (ok) {
@@ -255,6 +271,8 @@ public final class SchemaLoader {
         }
         return new SchemaSet(structs, packets, rules, sources);
     }
+
+    // ---- field parsing --------------------------------------------------------------------------
 
     static List<FieldDef> parseFields(List<FieldDto> dtos, String context, List<String> problems) {
         if (dtos == null) {
@@ -371,6 +389,151 @@ public final class SchemaLoader {
             throw new IllegalArgumentException("'opcode' " + value + " is outside 0..65535");
         }
         return value;
+    }
+
+    // ---- template validation --------------------------------------------------------------------
+
+    /**
+     * Check one template against the field it fills. Strings are scanned for placeholders;
+     * objects and arrays recurse into the struct / element definitions; everything else must coerce.
+     */
+    static void validateTemplate(Object template, FieldDef target, PacketDef source, SchemaSet probe,
+                                 String context, List<String> problems) {
+        if (template instanceof String text) {
+            List<String> references = TemplateEvaluator.references(text);
+            if (references.isEmpty()) {
+                checkConstant(text, target, probe, context, problems);
+                return;
+            }
+            boolean whole = TemplateEvaluator.isWholePlaceholder(text);
+            for (String reference : references) {
+                if (reference.startsWith("request.")) {
+                    String path = reference.substring("request.".length());
+                    FieldDef resolved = resolvePath(path, source.fields(), probe);
+                    if (resolved == null) {
+                        problems.add(context + ": '${" + reference + "}' does not resolve to a field of "
+                                + source.name() + " (path '" + path + "')");
+                    } else if (whole) {
+                        checkCompatible(resolved, target, reference, context, problems);
+                    }
+                } else if (!TemplateEvaluator.isKnownReference(reference)) {
+                    problems.add(context + ": unknown template reference '${" + reference + "}'");
+                }
+            }
+            if (!whole && target.type() != FieldType.STRING) {
+                problems.add(context + ": field '" + target.name() + "' is " + describe(target) + " but the template '"
+                        + text + "' mixes text and placeholders, which always yields a string");
+            }
+            return;
+        }
+        if (template instanceof Map<?, ?> map && target.type() == FieldType.STRUCT) {
+            StructDef struct = probe.struct(target.structName()).orElse(null);
+            if (struct == null) {
+                return; // reported by the structural checks
+            }
+            for (Map.Entry<?, ?> entry : map.entrySet()) {
+                String key = String.valueOf(entry.getKey());
+                FieldDef inner = struct.field(key).orElse(null);
+                if (inner == null) {
+                    problems.add(context + ": struct " + struct.name() + " has no field '" + key + "'");
+                    continue;
+                }
+                validateTemplate(entry.getValue(), inner, source, probe, context, problems);
+            }
+            return;
+        }
+        if (template instanceof List<?> list && target.type() == FieldType.ARRAY) {
+            FieldDef element = target.element();
+            for (Object item : list) {
+                validateTemplate(item, element, source, probe, context, problems);
+            }
+            return;
+        }
+        checkConstant(template, target, probe, context, problems);
+    }
+
+    private static void checkConstant(Object value, FieldDef target, SchemaSet probe, String context,
+                                      List<String> problems) {
+        try {
+            SchemaValues.coerce(value, target, probe, 0);
+        } catch (RuntimeException e) {
+            problems.add(context + ": constant for field '" + target.name() + "' is not valid: " + e.getMessage());
+        }
+    }
+
+    /** Walk a dotted path ({@code pos.x}, {@code items.0.id}) through the fields; null when it does not exist. */
+    static FieldDef resolvePath(String path, List<FieldDef> fields, SchemaSet probe) {
+        List<FieldDef> current = fields;
+        FieldDef resolved = null;
+        boolean expectIndex = false;
+        for (String part : path.split("\\.")) {
+            if (expectIndex) {
+                if (part.isEmpty() || !part.chars().allMatch(Character::isDigit)) {
+                    return null;
+                }
+                expectIndex = false;
+                resolved = resolved.element();
+                current = resolved.type() == FieldType.STRUCT
+                        ? probe.struct(resolved.structName()).map(StructDef::fields).orElse(null) : null;
+                continue;
+            }
+            if (current == null) {
+                return null;
+            }
+            FieldDef match = null;
+            for (FieldDef field : current) {
+                if (field.name().equals(part)) {
+                    match = field;
+                    break;
+                }
+            }
+            if (match == null) {
+                return null;
+            }
+            resolved = match;
+            if (match.type() == FieldType.STRUCT) {
+                current = probe.struct(match.structName()).map(StructDef::fields).orElse(null);
+            } else if (match.type() == FieldType.ARRAY) {
+                current = null;
+                expectIndex = true;
+            } else {
+                current = null;
+            }
+        }
+        return resolved;
+    }
+
+    private static void checkCompatible(FieldDef sourceField, FieldDef target, String reference, String context,
+                                        List<String> problems) {
+        FieldType s = sourceField.type();
+        FieldType d = target.type();
+        boolean ok;
+        if (d == FieldType.STRING) {
+            ok = true;
+        } else if (d.isInteger() || d.isFloat() || d == FieldType.BOOL) {
+            ok = s.isInteger() || s.isFloat() || s == FieldType.BOOL || s == FieldType.STRING;
+        } else if (d == FieldType.BYTES) {
+            ok = s == FieldType.BYTES || s == FieldType.STRING || s == FieldType.ARRAY;
+        } else if (d == FieldType.STRUCT) {
+            ok = s == FieldType.STRUCT && Objects.equals(sourceField.structName(), target.structName());
+        } else {
+            ok = s == FieldType.ARRAY && sourceField.elementType() == target.elementType()
+                    && (sourceField.elementType() != FieldType.STRUCT
+                    || Objects.equals(sourceField.structName(), target.structName()));
+        }
+        if (!ok) {
+            problems.add(context + ": '${" + reference + "}' is " + describe(sourceField) + " but field '"
+                    + target.name() + "' is " + describe(target));
+        }
+    }
+
+    static String describe(FieldDef field) {
+        return switch (field.type()) {
+            case STRUCT -> "struct " + field.structName();
+            case ARRAY -> "array of " + (field.elementType() == FieldType.STRUCT
+                    ? "struct " + field.structName() : field.elementType().id());
+            default -> field.type().id();
+        };
     }
 
     private static String join(List<String> problems) {

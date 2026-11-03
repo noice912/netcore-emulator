@@ -11,7 +11,7 @@ plugins {
 }
 
 group = 'core'
-version = '2.0.0'
+version = '2.0.1'
 
 java {
     sourceCompatibility = JavaVersion.VERSION_17
@@ -63,6 +63,20 @@ tasks.named('test') {
         events 'passed', 'skipped', 'failed'
         exceptionFormat 'full'
     }
+}
+
+// Validate schema files the way the engine loads them. Runs as part of `check` (and so `build`);
+// point it elsewhere with: ./gradlew checkSchemas --args="path/to/dir other.json"
+tasks.register('checkSchemas', JavaExec) {
+    group = 'verification'
+    description = 'Validates schema files (default: ./schemas); every problem is listed, exit 1 on failure.'
+    classpath = sourceSets.main.runtimeClasspath
+    mainClass = 'core.tools.SchemaCheck'
+    args 'schemas'
+    workingDir = projectDir
+}
+tasks.named('check') {
+    dependsOn 'checkSchemas'
 }
 
 // Ship the default config and the example schema next to the start scripts.

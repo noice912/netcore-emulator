@@ -1,0 +1,212 @@
+NETCORE-EMULATOR 2.0.1  -  LAUNCH-DAY DIAGNOSTIC REPORT
+=======================================================
+Generated 2026-11-03 (local) from live runs on this workstation:
+Windows 11 Pro 10.0.26200, 16 logical cores, Temurin JDK 17.0.16 (C:\Users\Joshu\Java\WPILib-jdk),
+repository C:\Users\Joshu\.claude\code\CustomEmulator, HEAD 3ecf03f (2.0.0) plus the uncommitted 2.0.1 work.
+
+
+0. INPUTS - WHAT WAS AND WAS NOT PROVIDED
+-----------------------------------------
+The request referred to attached material. None arrived, and none of it exists in the repository:
+  - console logs from start_checked.ps1   no such script existed. Written as tools/start_checked.ps1 and run 4 times.
+  - /metrics/prometheus exposition        scraped live from the running engine; parsed with tools/parse_metrics.ps1.
+  - custom JSON protocol schemas          only schemas/example.json exists in the workspace; it was validated.
+  - upgrade_build.ps1                     no such script existed. Written as tools/upgrade_build.ps1 and exercised.
+  - commit hash 9cbc1919                  not an object in this repository (history: 672844d v1.0.0 -> 3ecf03f v2.0.0).
+Every number below comes from the runs listed in section 6. Nothing is synthesized.
+
+
+1. INITIALIZATION & PORT LOG ANALYSIS
+-------------------------------------
+Five checked launches (engine pids 47448, 51788, 45664, 53552, 42504; the last against the 2.0.1 jar). Identical outcome each time:
+
+  pre-flight    TCP 22101 free | UDP 22102 free | admin TCP 22180 free  (collision scan names the owning process when hit)
+  schema check  OK: 6 packet(s), 2 struct(s), 3 response rule(s) from 1 file(s)
+  launch        java -cp lib\* core.engine.ServerEngine config.json  (stdin = empty file, stdout/stderr captured)
+  ready         2.1 - 2.2 s after launch (admin API answered GET /status)
+  bindings      TCP dispatch  BOUND  port 22101  engine running=true  OS socket table: LISTEN owned by the engine pid
+                UDP gateway   BOUND  port 22102  engine running=true  OS socket table: UDP endpoint owned by the engine pid
+                admin API     BOUND  port 22180  (127.0.0.1 only)
+  log scan      13 lines | bind failures 0 | ERROR 0 | WARN 0 | stderr file 0 bytes
+  shutdown      POST /shutdown -> {"stopping": true}; process gone within ~0.75 s; listeners, watchers and tick loop stopped in order
+
+Start-up log, run 1 (logs/engine-20261103-150836.out), timestamps verbatim:
+  15:08:39.878 ServerEngine       netcore-emulator engine v2.0.0 starting
+  15:08:39.882 PluginManager      plugin directory plugins does not exist; only classpath plugins are loaded   (informational)
+  15:08:39.900 SchemaManager      schemas loaded from schemas: 6 packet(s), 2 struct(s), 3 response rule(s) from 1 file(s)
+  15:08:40.073 ServerEngine       event loops allocated: boss=1, workers=32 (engine.workerThreads=0=auto, 16 cores)
+  15:08:40.151 TcpDispatchServer  TCP dispatch listener bound on /[0:0:0:0:0:0:0:0]:22101
+  15:08:40.164 UdpGatewayServer   UDP gateway listener bound on /[0:0:0:0:0:0:0:0]:22102
+  15:08:40.165 TickScheduler      tick loop started at 20 ticks/s with 0 tickable(s)
+  15:08:40.177 AdminHttpServer    admin API listening on http://127.0.0.1:22180/
+  15:08:40.183 FileWatcher        watching <repo> for changes          (config.json)
+  15:08:40.185 FileWatcher        watching <repo>\schemas for changes
+  15:08:40.186 ServerEngine       ready: TCP on :22101, UDP on :22102, admin on :22180
+  15:08:40.187 ServerConsole      console input closed; engine continues running (expected under start_checked: stdin is an empty file)
+  Note: bind address 0.0.0.0 is reported as the IPv6 any-address [0:0:0:0:0:0:0:0] because the JDK opens dual-stack
+  sockets. IPv4 clients are unaffected (the loopback client in section 3 connected over 127.0.0.1).
+
+Netty event-loop audit:
+  configured   engine.workerThreads = 0 (auto) -> Netty default 2 x 16 cores = 32 worker loops; 1 boss loop
+  reported     /status jvm.bossLoops=1, jvm.workerLoops=32 ; prometheus netcore_event_loops_boss 1, netcore_event_loops_worker 32
+  jstack       engine-boss 1 | engine-worker 2 | engine-tick 1 | engine-admin 2 | engine-maintenance 1 | config-watcher 1 | schema-watcher 1
+               43 threads in the dump; 20 live Java threads per ThreadMXBean (netcore_jvm_threads)
+  verdict      NO THREAD ALLOCATION ANOMALY. All 32 worker loops are allocated; only 2 had started a thread because Netty
+               starts event-loop threads lazily on first use (one loop served the accepted TCP connection, one the UDP
+               channel). The other 30 loops exist without a thread until traffic lands on them. The 43-vs-20 gap is
+               JVM-internal threads (GC, JIT compiler, VM thread) that jstack lists and ThreadMXBean does not count.
+  collisions   none. The pre-flight scan runs before every launch; a bound port aborts with exit 2 and the owner's pid/name.
+
+
+2. RUNTIME TELEMETRY & PROMETHEUS METRIC PARSING
+------------------------------------------------
+The exposition grew from 27 to 38 lines: JVM heap/non-heap, Netty pooled direct/heap buffer bytes, live threads,
+cores and event-loop counts were added in 2.0.1 because memory consumption was not observable before.
+
+Raw sample, run 1 (uptime 6 s, after one HelloRequest/HelloResponse exchange on a loopback TCP session):
+  netcore_up 1                                   netcore_uptime_seconds 6
+  netcore_sessions_active 0  tcp 0  udp 0  loopback 0        (the client had already disconnected)
+  netcore_connections_accepted_total 1           netcore_connections_rejected_total 0
+  netcore_packets_in_total 1   netcore_bytes_in_total 15     netcore_packets_out_total 1   netcore_bytes_out_total 54
+  netcore_packets_handled_total 1
+  netcore_packets_dropped_total 0   netcore_packets_rejected_total 0   netcore_packets_rate_limited_total 0
+  netcore_unknown_opcodes_total 0   netcore_malformed_packets_total 0  netcore_handler_errors_total 0
+  netcore_tick_count_total 133  netcore_tick_rate 20  netcore_tick_last_micros 24  netcore_tick_average_micros 28  netcore_tick_overruns_total 0
+  netcore_schema_packets_handled_total 1         netcore_schema_responses_sent_total 1
+  netcore_jvm_heap_used_bytes 17439744  (16.6 MiB)      netcore_jvm_heap_committed_bytes 528482304  (504 MiB)
+  netcore_jvm_heap_max_bytes 8401190912  (8012 MiB)     netcore_jvm_nonheap_used_bytes 21932240  (20.9 MiB)
+  netcore_netty_direct_memory_bytes 4194304  (4 MiB)    netcore_netty_heap_memory_bytes 0
+  netcore_jvm_threads 20   netcore_cpu_cores 16   netcore_event_loops_boss 1   netcore_event_loops_worker 32
+
+parse_metrics.ps1, two scrapes 3.1 s apart (run 1):
+  memory          heap 16.63 MiB used / 504.00 committed / 8,012.00 max; non-heap 21.46 MiB; netty direct 4.00 MiB, heap 0
+  sessions        0 active (tcp 0, udp 0, loopback 0); accepted +0 in the window
+  token bucket    0 violations total, delta +0
+  tick loop       20 tps, average 28 us, last 19 us, +61 ticks, +0 overruns
+  drops (delta)   dropped 0, rate-limited 0, rejected 0, malformed 0, unknown 0, handler errors 0, connections rejected 0
+  flags           none
+Final run against 2.0.1 (JSON mode, 2 s window): heap 16.6 MiB used, netty direct 4 MiB, 20 threads, tick average 27 us,
+last 22 us, +40 ticks, 0 overruns, every drop delta 0, flags none.
+
+Packet-drop / buffer-exhaustion indicators: NONE.
+  - every drop, malformed, rejected, rate-limited and handler-error counter is 0 across all runs
+  - Netty direct memory is 4 MiB (one pooled arena chunk, allocated on the first connection) against an 8012 MiB
+    ceiling (MaxDirectMemorySize defaults to the heap maximum)
+  - heap used is ~3% of committed; no collection pressure
+  - tick average 27-28 us against the 50,000 us period at 20 tps: ~0.06% duty cycle, zero overruns
+  parse_metrics.ps1 raises flags at: any drop delta > 0, any overrun delta > 0, netty direct > 75% of heap max,
+  heap used > 85% of committed; -FailOnFlags turns them into exit 1 for a pipeline gate.
+
+
+3. SCHEMA INTERPRETATION & TEMPLATE VALIDATION
+----------------------------------------------
+File evaluated: schemas/example.json (the only schema present).
+Structural validation (SchemaLoader): 6 packets with unique names and unique opcodes 0x0100 0x0101 0x0110 0x0111 0x0120
+0x0121 (all above the reserved 0x00FF range); 2 structs (Vec3, ItemStack), no cycles, every struct reference resolved;
+array fields MoveRequest.waypoints (element struct Vec3) and InventoryResponse.items (element struct ItemStack) carry a
+valid element type and the 16-bit count bound (65,535); nesting depth 2 of the allowed 8.
+
+Response-rule audit (load-time validation added in 2.0.1 - previously an unresolvable path degraded to the field default at runtime):
+  HelloRequest -> HelloResponse
+    retcode          0                                            constant -> i32                              OK
+    sessionId        "${session.id}"                              known reference -> i64                       OK
+    serverTimeMillis "${now.millis}"                              known reference -> i64                       OK
+    message          "Welcome, ${request.clientName} (build ${request.clientBuild})"
+                                                                  mixed text -> string; clientName:string and clientBuild:u32 both resolve   OK
+  MoveRequest -> MoveAck
+    entityId         "${request.entityId}"                        u32 -> u32                                   OK
+    position         "${request.position}"                        struct Vec3 -> struct Vec3                   OK
+    accepted         true                                         constant -> bool                             OK
+  InventoryRequest -> InventoryResponse
+    items            [{itemId 1001,count 5},{itemId 2002,count 1}] array of struct ItemStack; each constant coerces (u32/u16)   OK
+    capacity         30                                           constant -> u16                              OK
+Unresolvable evaluation paths: none. The loader now rejects, with every problem listed, any ${request.path} that does
+not resolve against the "on" packet (structs and array indexes are walked), any unknown reference, a type-preserving
+placeholder whose source type is incompatible with the target field, mixed-text templates aimed at non-string fields,
+and constants that do not coerce (15 SchemaLoaderTest cases cover this). At runtime SchemaHandler additionally catches
+every RuntimeException while building a reply, so a template can never terminate the handler or the event loop; the
+worst case is a logged error and no reply.
+
+Live verification (three runs): HelloRequest{clientName='launchday', clientBuild=20260} over TCP ->
+HelloResponse opcode 0x0101, 54-byte payload, retcode 0, sessionId 1, message 'Welcome, launchday (build 20260)'.
+Struct round trip over UDP and hot reload of an edited schema file are covered by SchemaIntegrationTest.
+Pipeline gate: `gradlew checkSchemas` (now part of `gradlew check`, hence `build`) or
+`java -cp "lib\*" core.tools.SchemaCheck <dir|file>...` - exit 1 with every problem listed.
+
+
+4. SANDBOX ALIGNMENT & DEPLOYMENT AUTOMATION
+--------------------------------------------
+tools/upgrade_build.ps1 - exercised live against this checkout with 13 uncommitted changes present:
+  run 1  -ProtectCommit 9cbc1919 -NoBuild                   exit 2  refused: dirty working tree (13 changes listed); nothing touched
+  run 2  -ProtectCommit 9cbc1919 -AutoStash -NoBuild        exit 3  stashed 13 changes; "commit 9cbc1919 does not exist in this
+                                                                    repository (git cat-file -e); nothing was changed"; stash restored
+  run 3  -ProtectCommit 3ecf03f -AutoStash -NoBuild         exit 0  protected 3ecf03fa9602... reachable from HEAD; unpushed 0;
+                                                                    backup branch backup/pre-upgrade-20261103-152055 and tag created;
+                                                                    fetch; HEAD already contains origin/main; protected still reachable;
+                                                                    stash restored
+  run 4  -ProtectCommit 3ecf03f -AutoStash -NoBuild -Rebase exit 3  refused: a rebase would rewrite the protected hash
+                                                                    (override only with -AllowRewrite); stash restored
+  after  13 uncommitted changes (unchanged), 0 stash entries; the demo's backup branch and tag were deleted afterwards.
+  Retention guarantees: the protected commit must exist and be an ancestor of HEAD before and after the integration;
+  the integration is a --no-ff merge so local commits keep their hashes; a backup branch and tag mark the pre-upgrade
+  HEAD; conflicts abort and restore the tree; a failed build can roll back (-RollbackOnBuildFailure).
+  About 9cbc1919: it is not in this repository. If it lives in another clone, run the script there; the check is exact
+  (git cat-file -e <hash>^{commit}) and the script refuses to continue when it fails.
+
+tools/launch_client_sandbox.bat - 11 cases exercised in --dry-run (nothing started, nothing created):
+  A  default sandbox C:\Genshin_Isolated_Sandbox_7.1 (absent on this machine)   exit 2  sandbox not found
+  B  test sandbox + client args                                               exit 0  plan: exe and cwd inside the sandbox, args forwarded, launch.log appended
+  C  --exe C:\Windows\notepad.exe                                             exit 4  refused: outside the sandbox
+  D  --workspace <external dir>                                               exit 0  would junction <sandbox>\client -> workspace; plan from the workspace
+  E  --bogus                                                                  exit 1  unknown option
+  F  --verify-size on a near-empty tree                                       exit 7  expects >= 2.5 GB of client files
+  G  exe under a \HoYoPlay\ path inside the sandbox                           exit 4  refused: live-launcher marker
+  H  --require-engine with the engine down                                    exit 5  admin API not answering
+  I  --require-engine with the engine up                                      exit 0  [OK] emulator admin API is up
+  J  sandbox without an executable                                            exit 3  no GenshinImpact.exe / YuanShen.exe
+  K  --workspace that does not exist                                          exit 2  workspace not found
+  Binding model: the client always runs with its working directory inside the sandbox (its own folder, or the
+  junction <sandbox>\client when an external trimmed workspace is bound - a directory junction, no copy). Executables
+  under %ProgramFiles%, %ProgramFiles(x86)%, %LocalAppData%\Programs, or any path containing HoYoPlay, Genshin Impact
+  or miHoYo Launcher are refused. The script never changes network settings and contacts nothing but 127.0.0.1:22180
+  (the optional engine gate).
+  Two cmd.exe defects were found and fixed while testing it:
+    1. findstr /C:"<dir>\" cannot express a trailing backslash (parsed as an escaped quote), so a path inside the
+       sandbox was judged outside it. Replaced by a string-comparison walk up the directory chain.
+    2. exit /b N inside a ( ) block that also contains a command line with quoted parentheses (the powershell
+       one-liners) sets ERRORLEVEL correctly but cmd.exe returns 0 as the process exit code. Verified with a minimal
+       reproduction (ERRORLEVEL 5, process exit 0). All failure exits now go through a statement-level :die label
+       (process exit 5/7 after the fix).
+
+
+5. ENGINE CHANGES 2.0.0 -> 2.0.1
+--------------------------------
+  EngineStatus.JvmStatus + ServerEngine.jvmStatus()   heap used/committed/max, non-heap, Netty pooled direct/heap bytes,
+                                                      thread count, cores, boss/worker loop counts; in `status` and /status
+  AdminHttpServer                                     11 new Prometheus gauges; POST /shutdown (answers, then stops on another thread)
+  ServerEngine                                        logs "event loops allocated: boss=N, workers=M (...)" at start-up
+  SchemaLoader / TemplateEvaluator                    load-time validation of every response-rule template
+  core.tools.SchemaCheck + Gradle task checkSchemas   schema validation from a pipeline; wired into `check`
+  tests                                               148 (was 137): SchemaLoaderTest +5, SchemaCheckTest 4, AdminHttpServerTest +2; 0 failures
+  tools/                                              start_checked.ps1, parse_metrics.ps1, upgrade_build.ps1, launch_client_sandbox.bat
+  version                                             2.0.1 (build.gradle, ServerEngine.VERSION); README.md and SUMMARY.txt updated
+
+
+6. EVIDENCE FILES
+-----------------
+  logs/start_checked-20261103-150836.txt     run 1 report (pid 47448, 2.0.0 jar)
+  logs/start_checked-20261103-151002.txt     run 2 report (pid 51788)
+  logs/start_checked-20261103-151050.txt     run 3 report (pid 45664)
+  logs/start_checked-20261103-151653.txt     run 4 report (pid 53552)
+  logs/start_checked-20261103-152246.txt     run 5 report (pid 42504, 2.0.1 jar)
+  logs/engine-20261103-150836.out / .err     run 1 engine stdout and stderr (stderr 0 bytes)
+  build/test-results/test/*.xml              148 tests, 0 failures, 0 errors
+  (logs/ and build/ are git-ignored; this report is the durable copy)
+
+
+7. OPEN ITEMS THAT NEED YOUR INPUT
+----------------------------------
+  - The custom schema files: attach them and SchemaCheck will report on them; only example.json exists here.
+  - Commit 9cbc1919: point me at the clone that contains it, or confirm the hash; this repository has 672844d and 3ecf03f.
+  - The client executable name inside C:\Genshin_Isolated_Sandbox_7.1 if it is neither GenshinImpact.exe nor YuanShen.exe
+    (pass --exe), and whether the trimmed workspace lives inside the sandbox or should be junction-bound (--workspace).
