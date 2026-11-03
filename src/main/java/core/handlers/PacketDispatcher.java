@@ -6,7 +6,6 @@ import core.network.Frame;
 import core.network.NetworkSession;
 import core.network.PacketRecorder;
 import io.netty.buffer.ByteBuf;
-import io.netty.buffer.ByteBufUtil;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -123,8 +122,8 @@ public final class PacketDispatcher {
             return onMalformed(session, registration, payload, e, cfg);
         }
         if (payload.isReadable() && log.isDebugEnabled()) {
-            log.debug("session {}: {} left {} trailing byte(s) unread", session.id(), packet,
-                    payload.readableBytes());
+            log.debug("session {}: {} left {} trailing byte(s) unread\n{}", session.id(), packet,
+                    payload.readableBytes(), HexDump.annotated(payload, payload.readerIndex(), DUMP_BYTES));
         }
 
         try {
@@ -159,8 +158,9 @@ public final class PacketDispatcher {
         int count = session.recordUnknownPacket();
         metrics.unknownOpcode();
         if (cfg.engine().logUnknownOpcodes()) {
-            log.warn("session {} ({}) sent unknown opcode 0x{} with {} byte(s){}", session.id(),
-                    session.remoteAddress(), hex(opcode), payload.readableBytes(), headDump(payload));
+            log.warn("session {} ({}) sent unknown opcode 0x{} with {} byte(s)\n{}", session.id(),
+                    session.remoteAddress(), hex(opcode), payload.readableBytes(),
+                    HexDump.annotated(payload, -1, DUMP_BYTES));
         }
         int limit = cfg.security().maxUnknownPacketsPerSession();
         if (limit > 0 && count > limit) {
@@ -173,9 +173,10 @@ public final class PacketDispatcher {
                                        ByteBuf payload, Exception cause, EngineConfig cfg) {
         int count = session.recordMalformedPacket();
         metrics.malformedPacket();
-        log.warn("session {} ({}) sent malformed {} (0x{}): {}{}", session.id(), session.remoteAddress(),
+        int offset = cause instanceof PacketDecodeException pde ? pde.errorOffset() : -1;
+        log.warn("session {} ({}) sent malformed {} (0x{}): {}\n{}", session.id(), session.remoteAddress(),
                 registration.packetType().getSimpleName(), hex(registration.opcode()), cause.getMessage(),
-                headDump(payload));
+                HexDump.annotated(payload, offset, DUMP_BYTES));
         int limit = cfg.security().maxMalformedPacketsPerSession();
         if (limit > 0 && count > limit) {
             session.close("too many malformed packets (" + count + ")");
@@ -185,15 +186,5 @@ public final class PacketDispatcher {
 
     private static String hex(int opcode) {
         return String.format("%04X", opcode);
-    }
-
-    /** First bytes of the payload (from its start, regardless of reader index) for log lines. */
-    private static String headDump(ByteBuf payload) {
-        int total = payload.writerIndex();
-        if (total == 0) {
-            return "";
-        }
-        int n = Math.min(DUMP_BYTES, total);
-        return " head=" + ByteBufUtil.hexDump(payload, 0, n) + (total > n ? "..." : "");
     }
 }

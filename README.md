@@ -101,7 +101,10 @@ after the reply. Java code can also react to schema packets through
 `engine.schemas().addListener((session, packet) -> ...)` and build replies with
 `engine.schemas().build("MoveAck").set("entityId", 5)`.
 
-Schema packets never override an opcode a Java handler already owns.
+Schema packets never override an opcode a Java handler already owns. Reloads are a diff-based
+atomic swap: each surviving opcode is replaced in place and stays continuously resolvable, so a
+hot-swap while clients are connected never makes a live opcode briefly unknown; only opcodes that
+were removed from the schema are unregistered.
 
 Every response rule is validated when the schema loads, not when a packet arrives: each
 `${request.<path>}` must resolve to a field of the `on` packet (walking structs and array indexes),
@@ -184,6 +187,18 @@ All scripts are Windows PowerShell 5.1 / cmd.exe compatible and run from any wor
 Packet capture (`capture on`, or `capture.enabled`) writes every inbound and outbound frame to
 `captures/capture-<timestamp>.log` as timestamped hex lines: the raw material for writing schemas
 of an unknown protocol.
+
+When a packet is unknown, malformed, or leaves trailing bytes, the dispatcher logs an
+offset/hex/ASCII dump of the payload with a caret under the exact byte where decoding failed
+(`PacketDecodeException` carries that offset; the table is rendered by `core.handlers.HexDump` only
+at log time, never on the happy path). Example for a short PING:
+
+```
+payload=3 byte(s), failed at offset 0 (0x0)
+offset   00 01 02 03 04 05 06 07 08 09 0a 0b 0c 0d 0e 0f  ascii
+00000000 aa bb cc                                         ...
+         ^^ here
+```
 
 ## Handshake and authentication
 

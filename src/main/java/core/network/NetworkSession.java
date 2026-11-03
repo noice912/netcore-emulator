@@ -191,10 +191,8 @@ public final class NetworkSession {
                     inboundBucket = bucket;
                 }
             }
-        } else if (bucket.ratePerSecond() != packetsPerSecond || bucket.capacity() != burst) {
-            bucket.reconfigure(packetsPerSecond, burst);
         }
-        return bucket.tryAcquire();
+        return bucket.tryAcquire(packetsPerSecond, burst);
     }
 
     public int recordRateLimitViolation() {

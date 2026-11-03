@@ -47,6 +47,28 @@ public final class TokenBucket {
         return false;
     }
 
+    /**
+     * Reconfigure the limits in place if they changed, then take one token. Folds the rate-change
+     * check, the refill and the acquire into a single lock acquisition, so the hot inbound packet
+     * path takes exactly one monitor instead of three (rate + capacity + acquire).
+     */
+    public synchronized boolean tryAcquire(double ratePerSecond, double capacity) {
+        if (ratePerSecond != this.ratePerSecond || capacity != this.capacity) {
+            check(ratePerSecond, capacity);
+            this.ratePerSecond = ratePerSecond;
+            this.capacity = capacity;
+        }
+        refill();
+        if (tokens > this.capacity) {
+            tokens = this.capacity;
+        }
+        if (tokens >= 1.0) {
+            tokens -= 1.0;
+            return true;
+        }
+        return false;
+    }
+
     public synchronized double available() {
         refill();
         return tokens;

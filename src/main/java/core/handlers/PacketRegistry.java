@@ -111,7 +111,9 @@ public final class PacketRegistry {
         Registration<T> registration = build(opcode, factory, handler);
         Registration<?> previous = registrations.put(opcode, registration);
         if (previous != null) {
-            log.info("replaced handler for opcode 0x{}: {} -> {}", String.format("%04X", opcode),
+            // Debug, not info: a schema hot-reload calls replace() for every surviving opcode, so at
+            // info this would emit one line per packet on each reload of a large schema set.
+            log.debug("replaced handler for opcode 0x{}: {} -> {}", String.format("%04X", opcode),
                     previous.handler().name(), handler.name());
         } else {
             log.debug("registered {}", registration);

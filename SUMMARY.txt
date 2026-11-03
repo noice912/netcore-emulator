@@ -1,13 +1,13 @@
 NETCORE-EMULATOR  -  PROJECT SUMMARY
 =====================================
 
-Version   : 2.0.1 (heavyweight + launch tooling)   Built : 2026-11-03
+Version   : 2.0.2 (heavyweight + launch tooling + parsing-engine hardening)   Built : 2026-11-03
 Language  : Java 17                    Build : Gradle 9.6 via bundled wrapper (gradlew / gradlew.bat)
 Libraries : Netty 4.1.140 (NIO event loops), Gson 2.13.1 (JSON), SLF4J 2.0 + Logback 1.5 (logging),
             JUnit 5.14 (tests). Nothing from any existing game-server framework.
 Location  : C:\Users\Joshu\.claude\code\CustomEmulator   (Gradle project / distribution name: netcore-emulator)
 GitHub    : https://github.com/noice912/netcore-emulator
-Code size : 66 main classes (~8,000 lines), 23 test sources (~2,800 lines), 148 tests in 20 test classes, all passing.
+Code size : 67 main classes (~8,100 lines), 24 test sources (~2,900 lines), 155 tests in 21 test classes, all passing.
 Tooling   : tools/start_checked.ps1, tools/parse_metrics.ps1, tools/upgrade_build.ps1, tools/launch_client_sandbox.bat
 
 
@@ -327,7 +327,17 @@ Integration tests bind real sockets on 127.0.0.1 ephemeral ports; Netty leak det
        exposition, POST /shutdown, load-time validation of every response-rule template
        (request paths, known references, type compatibility, constants), core.tools.SchemaCheck
        + `gradlew checkSchemas` (part of `check`), tools/ scripts for checked start-up, metrics
-       parsing, safe upgrades and the client sandbox launcher, 148 tests. (This working tree.)
+       parsing, safe upgrades and the client sandbox launcher, 148 tests.
+2.0.2  Parsing-engine hardening for mass runtime updates: SchemaManager.reload() is now a
+       diff-based atomic swap (registry.replace() keeps every surviving opcode continuously
+       registered, so a concurrent reload never trips the UNKNOWN_OPCODE disconnect path; only
+       vanished opcodes are unregistered). PacketDecodeException carries a byte errorOffset,
+       BasePacket.require() forwards the reader index, and the new core.handlers.HexDump renders a
+       fixed-width offset/hex/ASCII table with a caret under the failing byte, wired into the
+       dispatcher's malformed, unknown-opcode and trailing-byte paths (built lazily at log time).
+       TokenBucket gains tryAcquire(rate, capacity) so the inbound path takes one lock per packet
+       instead of three. PacketRegistry.replace() logs at DEBUG to keep mass reloads quiet.
+       155 tests. (This working tree.)
 
 
 15. FILE INVENTORY

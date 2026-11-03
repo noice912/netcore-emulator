@@ -95,7 +95,9 @@ class SchemaPacketTest {
         ByteBuf wire = Unpooled.buffer();
         packet(set).set("name", "something long enough").encode(wire);
         ByteBuf truncated = wire.copy(0, 5);
-        assertThrows(PacketDecodeException.class, () -> packet(set).decode(truncated));
+        PacketDecodeException e =
+                assertThrows(PacketDecodeException.class, () -> packet(set).decode(truncated));
+        assertTrue(e.errorOffset() >= 0, "decode failure should carry a byte offset, was " + e.errorOffset());
         wire.release();
         truncated.release();
     }

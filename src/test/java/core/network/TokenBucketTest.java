@@ -37,6 +37,25 @@ class TokenBucketTest {
     }
 
     @Test
+    void unifiedTryAcquireReconfiguresInline() {
+        TokenBucket bucket = new TokenBucket(1, 2);
+        assertTrue(bucket.tryAcquire(1, 2));
+        assertTrue(bucket.tryAcquire(1, 2));
+        assertFalse(bucket.tryAcquire(1, 2), "burst of 2 is exhausted");
+        // shrink the capacity on the same call: the new limits take effect and it stays throttled
+        assertFalse(bucket.tryAcquire(1, 1));
+        assertEquals(1.0, bucket.capacity());
+        assertEquals(1.0, bucket.ratePerSecond());
+    }
+
+    @Test
+    void unifiedTryAcquireRejectsNonPositiveLimits() {
+        TokenBucket bucket = new TokenBucket(1, 1);
+        assertThrows(IllegalArgumentException.class, () -> bucket.tryAcquire(0, 1));
+        assertThrows(IllegalArgumentException.class, () -> bucket.tryAcquire(1, 0));
+    }
+
+    @Test
     void rejectsNonPositiveLimits() {
         assertThrows(IllegalArgumentException.class, () -> new TokenBucket(0, 1));
         assertThrows(IllegalArgumentException.class, () -> new TokenBucket(1, 0));

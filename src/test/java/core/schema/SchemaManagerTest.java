@@ -215,4 +215,26 @@ class SchemaManagerTest {
         manager.reload();
         assertThrows(IllegalArgumentException.class, () -> manager.build("Nope"));
     }
+
+    @Test
+    void reloadReplacesSurvivingOpcodeInPlaceWithTheNewLayout() throws Exception {
+        manager.reload();
+        assertTrue(registry.contains(0x0100));
+        // Change HelloReq's field layout but keep its opcode: it must stay registered across the
+        // reload (never transiently unregistered) and pick up the new definition.
+        Files.writeString(dir.resolve("hello.json"),
+                "{ \"packets\": [ { \"name\": \"HelloReq\", \"opcode\": \"0x0100\", \"fields\": ["
+                        + " {\"name\":\"extra\",\"type\":\"u32\"} ] } ] }",
+                StandardCharsets.UTF_8);
+        SchemaManager.LoadResult result = manager.reload();
+
+        assertTrue(result.success(), result.message());
+        assertTrue(registry.contains(0x0100), "surviving opcode stays registered across the reload");
+        SchemaPacket packet = (SchemaPacket) registry.lookup(0x0100).orElseThrow().newPacket();
+        assertTrue(packet.def().field("extra").isPresent(), "new field layout is live");
+        assertTrue(packet.def().field("name").isEmpty(), "old field layout is gone");
+        // HelloRsp (0x0101) and Bye (0x0102) are gone from this file now, so they are unregistered.
+        assertFalse(registry.contains(0x0101));
+        assertFalse(registry.contains(0x0102));
+    }
 }

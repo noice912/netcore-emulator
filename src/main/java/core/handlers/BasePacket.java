@@ -76,7 +76,7 @@ public abstract class BasePacket {
         }
         if (in.readableBytes() < bytes) {
             throw new PacketDecodeException("truncated payload reading '" + field + "': need " + bytes
-                    + " byte(s), have " + in.readableBytes());
+                    + " byte(s), have " + in.readableBytes(), in.readerIndex());
         }
     }
 
@@ -109,7 +109,7 @@ public abstract class BasePacket {
         int length = readU16(in, field + ".length");
         if (length > MAX_STRING_BYTES) {
             throw new PacketDecodeException("string '" + field + "' is " + length + " bytes; limit is "
-                    + MAX_STRING_BYTES);
+                    + MAX_STRING_BYTES, in.readerIndex());
         }
         require(in, length, field);
         String value = in.toString(in.readerIndex(), length, StandardCharsets.UTF_8);
@@ -121,7 +121,7 @@ public abstract class BasePacket {
         int length = readInt(in, field + ".length");
         if (length < 0 || length > MAX_BLOB_BYTES) {
             throw new PacketDecodeException("blob '" + field + "' length " + length + " is outside 0.."
-                    + MAX_BLOB_BYTES);
+                    + MAX_BLOB_BYTES, in.readerIndex());
         }
         require(in, length, field);
         byte[] value = new byte[length];

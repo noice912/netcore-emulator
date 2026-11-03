@@ -58,24 +58,34 @@ public final class SchemaManager implements AutoCloseable {
                     e.getMessage());
         }
 
-        for (int opcode : registered) {
-            registry.unregister(opcode);
-        }
-        registered.clear();
-
+        // Diff-based swap. replace() is an atomic put, so every opcode that survives the reload stays
+        // continuously resolvable in the registry: concurrent dispatch never sees a surviving opcode
+        // transiently absent, and a mass runtime update cannot trip the UNKNOWN_OPCODE disconnect path.
+        // Only opcodes that have genuinely disappeared are unregistered, and only after the new set is
+        // fully in place.
+        Set<Integer> next = new HashSet<>();
         int skipped = 0;
         for (PacketDef def : loaded.packets()) {
-            if (registry.contains(def.opcode())) {
+            int opcode = def.opcode();
+            // Owned by a Java handler when it is in the registry but was not one of ours last reload.
+            if (!registered.contains(opcode) && registry.contains(opcode)) {
                 log.warn("schema packet '{}' not registered: opcode 0x{} belongs to a Java handler ({})", def.name(),
-                        String.format("%04X", def.opcode()),
-                        registry.lookup(def.opcode()).map(r -> r.handler().name()).orElse("?"));
+                        String.format("%04X", opcode),
+                        registry.lookup(opcode).map(r -> r.handler().name()).orElse("?"));
                 skipped++;
                 continue;
             }
             final SchemaSet set = loaded;
-            registry.register(def.opcode(), () -> new SchemaPacket(def, set), new SchemaHandler(def, this));
-            registered.add(def.opcode());
+            registry.replace(opcode, () -> new SchemaPacket(def, set), new SchemaHandler(def, this));
+            next.add(opcode);
         }
+        for (int opcode : registered) {
+            if (!next.contains(opcode)) {
+                registry.unregister(opcode);
+            }
+        }
+        registered.clear();
+        registered.addAll(next);
         current = loaded;
 
         String message = String.format("%d packet(s), %d struct(s), %d response rule(s) from %d file(s)%s",
