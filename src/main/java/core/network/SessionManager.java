@@ -2,6 +2,7 @@ package core.network;
 
 import core.engine.EngineConfig;
 import core.engine.EngineMetrics;
+import core.handlers.BasePacket;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -15,6 +16,7 @@ import java.util.Optional;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.concurrent.atomic.AtomicLong;
+import java.util.function.Predicate;
 import java.util.function.Supplier;
 
 /**
@@ -36,6 +38,7 @@ public final class SessionManager {
     private final ConcurrentHashMap<InetAddress, Integer> perAddress = new ConcurrentHashMap<>();
     private final AtomicLong sequence = new AtomicLong();
     private final CopyOnWriteArrayList<SessionListener> listeners = new CopyOnWriteArrayList<>();
+    private volatile PacketRecorder recorder;
 
     public SessionManager(Supplier<EngineConfig> config, EngineMetrics metrics) {
         this.config = Objects.requireNonNull(config, "config");
@@ -210,6 +213,41 @@ public final class SessionManager {
             }
         }
         return closed;
+    }
+
+    /** Send one packet to every open session that passes the filter. Returns how many were queued. */
+    public int broadcast(BasePacket packet, Predicate<NetworkSession> filter) {
+        Objects.requireNonNull(packet, "packet");
+        Objects.requireNonNull(filter, "filter");
+        int sent = 0;
+        for (NetworkSession s : byId.values()) {
+            if (s.isOpen() && filter.test(s) && s.send(packet)) {
+                sent++;
+            }
+        }
+        return sent;
+    }
+
+    /** Send one packet to every open session. */
+    public int broadcast(BasePacket packet) {
+        return broadcast(packet, s -> true);
+    }
+
+    /** Attach (or detach with {@code null}) a recorder that sees every outbound frame. */
+    public void setRecorder(PacketRecorder recorder) {
+        this.recorder = recorder;
+    }
+
+    public Optional<PacketRecorder> recorder() {
+        return Optional.ofNullable(recorder);
+    }
+
+    PacketRecorder recorderOrNull() {
+        return recorder;
+    }
+
+    EngineMetrics metrics() {
+        return metrics;
     }
 
     public void addListener(SessionListener listener) {

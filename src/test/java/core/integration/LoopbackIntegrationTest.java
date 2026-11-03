@@ -31,6 +31,15 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 @Timeout(value = 30, unit = TimeUnit.SECONDS)
 class LoopbackIntegrationTest {
 
+    /** Minimal engine: listeners only, every optional subsystem off. */
+    static final String BASE = """
+            "admin": { "enabled": false },
+            "persistence": { "enabled": false },
+            "schemas": { "enabled": false },
+            "engine": { "consoleEnabled": false, "configWatchEnabled": false, "pluginsEnabled": false,
+                        "maintenanceIntervalSeconds": 1 }
+            """;
+
     private ServerEngine engine;
 
     @BeforeEach
@@ -42,13 +51,9 @@ class LoopbackIntegrationTest {
                     "dispatch": { "port": 0, "idleTimeoutSeconds": 0 },
                     "gateway":  { "port": 0 }
                   },
-                  "engine": {
-                    "consoleEnabled": false,
-                    "configWatchEnabled": false,
-                    "maintenanceIntervalSeconds": 1
-                  }
+                  %s
                 }
-                """;
+                """.formatted(BASE);
         Path cfg = dir.resolve("config.json");
         Files.writeString(cfg, json, StandardCharsets.UTF_8);
         engine = ServerEngine.create(cfg);
@@ -101,7 +106,6 @@ class LoopbackIntegrationTest {
             socket.setSoTimeout(5_000);
             socket.getOutputStream().write(Frames.toWire(new DisconnectPacket("leaving"), null));
             socket.getOutputStream().flush();
-            // The server closes after handling DISCONNECT, so the peer sees end-of-stream.
             int eof = socket.getInputStream().read();
             assertEquals(-1, eof, "server should close the connection");
         }
@@ -128,7 +132,6 @@ class LoopbackIntegrationTest {
 
     @Test
     void encryptedTcpRoundTripWhenConfigured(@TempDir Path dir) throws Exception {
-        // Restart the engine with encryption enabled.
         engine.stop();
         byte[] key = {0x10, 0x20, 0x30, 0x40};
         String json = """
@@ -136,9 +139,9 @@ class LoopbackIntegrationTest {
                   "network": { "bindAddress": "127.0.0.1",
                     "dispatch": { "port": 0, "idleTimeoutSeconds": 0 }, "gateway": { "enabled": false } },
                   "security": { "encryption": { "enabled": true, "keyHex": "10203040" } },
-                  "engine": { "consoleEnabled": false, "configWatchEnabled": false }
+                  %s
                 }
-                """;
+                """.formatted(BASE);
         Path cfg = dir.resolve("enc.json");
         Files.writeString(cfg, json, StandardCharsets.UTF_8);
         engine = ServerEngine.create(cfg);
@@ -154,5 +157,14 @@ class LoopbackIntegrationTest {
             echo.decode(reply.payloadBuf());
             assertEquals("ciphered", echo.message());
         }
+    }
+
+    @Test
+    void statusReportsBoundListeners() {
+        String status = engine.status();
+        assertTrue(status.contains("listening on port " + engine.dispatchPort()), status);
+        assertTrue(status.contains("listening on port " + engine.gatewayPort()), status);
+        assertTrue(engine.statusSnapshot().running());
+        assertEquals("netcore-emulator", engine.statusSnapshot().name());
     }
 }

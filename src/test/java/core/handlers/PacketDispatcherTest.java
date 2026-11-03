@@ -172,4 +172,40 @@ class PacketDispatcherTest {
         frame.release();
         assertFalse(f.session().isOpen());
     }
+
+    @Test
+    void floodIsRateLimitedThenSessionIsClosed() throws Exception {
+        EngineConfig config = EngineConfig.parse(
+                "{\"security\":{\"rateLimit\":{\"packetsPerSecond\":1,\"burst\":2,\"maxViolations\":1}}}", "test");
+        Fixture f = newFixture(config);
+
+        for (int i = 0; i < 2; i++) {
+            Frame frame = frameOf(new PingPacket(i));
+            assertEquals(DispatchResult.HANDLED, f.dispatcher().dispatch(f.session(), frame), "burst packet " + i);
+            frame.release();
+        }
+        Frame third = frameOf(new PingPacket(3));
+        assertEquals(DispatchResult.RATE_LIMITED, f.dispatcher().dispatch(f.session(), third));
+        third.release();
+        assertTrue(f.session().isOpen(), "first violation is within maxViolations");
+
+        Frame fourth = frameOf(new PingPacket(4));
+        assertEquals(DispatchResult.RATE_LIMITED, f.dispatcher().dispatch(f.session(), fourth));
+        fourth.release();
+        assertFalse(f.session().isOpen(), "second violation exceeds maxViolations=1");
+        assertEquals(2, f.metrics().snapshot().packetsRateLimited());
+        assertEquals(2, f.session().rateLimitViolations());
+    }
+
+    @Test
+    void rateLimitCanBeDisabled() throws Exception {
+        EngineConfig config = EngineConfig.parse("{\"security\":{\"rateLimit\":{\"enabled\":false}}}", "test");
+        Fixture f = newFixture(config);
+        for (int i = 0; i < 50; i++) {
+            Frame frame = frameOf(new PingPacket(i));
+            assertEquals(DispatchResult.HANDLED, f.dispatcher().dispatch(f.session(), frame));
+            frame.release();
+        }
+        assertEquals(0, f.metrics().snapshot().packetsRateLimited());
+    }
 }

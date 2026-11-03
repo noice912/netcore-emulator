@@ -8,19 +8,23 @@ import java.util.Set;
 import java.util.TreeMap;
 import java.util.TreeSet;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.atomic.LongAdder;
 import java.util.function.Function;
 
 /**
  * Process-wide, thread-safe, namespaced key/value memory.
  *
- * <p>Engine state that must outlive a single packet or session (accounts, tokens, world data,
- * counters) lives here. Each namespace is an independent {@link ConcurrentHashMap}; reads are typed
- * so a caller never gets a {@link ClassCastException} from a value another component stored.
- * Nothing is persisted: the store is empty on every start.
+ * <p>Engine state that must outlive a single packet or session (accounts, world data, counters)
+ * lives here. Each namespace is an independent {@link ConcurrentHashMap}; reads are typed so a
+ * caller never gets a {@link ClassCastException} from a value another component stored.
+ *
+ * <p>The store itself is volatile memory. {@link PersistentStore} can snapshot it to disk; the
+ * {@link #modificationCount()} lets it skip saves when nothing changed.
  */
 public final class MemoryStore {
 
     private final ConcurrentHashMap<String, ConcurrentHashMap<String, Object>> namespaces = new ConcurrentHashMap<>();
+    private final LongAdder modifications = new LongAdder();
 
     private static String checkName(String name, String what) {
         Objects.requireNonNull(name, what);
@@ -36,7 +40,9 @@ public final class MemoryStore {
 
     /** Store a value (null is not allowed; use {@link #remove} instead). Returns the previous value. */
     public Object put(String namespace, String key, Object value) {
-        return space(namespace).put(checkName(key, "key"), Objects.requireNonNull(value, "value"));
+        Object previous = space(namespace).put(checkName(key, "key"), Objects.requireNonNull(value, "value"));
+        modifications.increment();
+        return previous;
     }
 
     public Optional<Object> get(String namespace, String key) {
@@ -58,8 +64,14 @@ public final class MemoryStore {
     public <T> T computeIfAbsent(String namespace, String key, Class<T> type, Function<String, ? extends T> factory) {
         Objects.requireNonNull(type, "type");
         Objects.requireNonNull(factory, "factory");
-        Object value = space(namespace).computeIfAbsent(checkName(key, "key"), k ->
-                Objects.requireNonNull(factory.apply(k), "factory returned null"));
+        boolean[] created = new boolean[1];
+        Object value = space(namespace).computeIfAbsent(checkName(key, "key"), k -> {
+            created[0] = true;
+            return Objects.requireNonNull(factory.apply(k), "factory returned null");
+        });
+        if (created[0]) {
+            modifications.increment();
+        }
         if (!type.isInstance(value)) {
             throw new IllegalStateException(namespace + "/" + key + " holds " + value.getClass().getName()
                     + ", not " + type.getName());
@@ -73,7 +85,11 @@ public final class MemoryStore {
 
     public boolean remove(String namespace, String key) {
         ConcurrentHashMap<String, Object> space = namespaces.get(checkName(namespace, "namespace"));
-        return space != null && space.remove(checkName(key, "key")) != null;
+        boolean removed = space != null && space.remove(checkName(key, "key")) != null;
+        if (removed) {
+            modifications.increment();
+        }
+        return removed;
     }
 
     /** Atomically add {@code delta} to a numeric value (created as 0 if absent) and return the result. */
@@ -85,6 +101,7 @@ public final class MemoryStore {
             }
             return current.longValue() + ((Number) add).longValue();
         });
+        modifications.increment();
         return ((Number) result).longValue();
     }
 
@@ -99,11 +116,16 @@ public final class MemoryStore {
     }
 
     public void clear(String namespace) {
-        namespaces.remove(checkName(namespace, "namespace"));
+        if (namespaces.remove(checkName(namespace, "namespace")) != null) {
+            modifications.increment();
+        }
     }
 
     public void clearAll() {
-        namespaces.clear();
+        if (!namespaces.isEmpty()) {
+            namespaces.clear();
+            modifications.increment();
+        }
     }
 
     public Set<String> namespaces() {
@@ -123,5 +145,10 @@ public final class MemoryStore {
         Map<String, Integer> stats = new TreeMap<>();
         namespaces.forEach((name, space) -> stats.put(name, space.size()));
         return Collections.unmodifiableMap(stats);
+    }
+
+    /** Monotonic count of mutations; compare two readings to learn whether anything changed. */
+    public long modificationCount() {
+        return modifications.sum();
     }
 }

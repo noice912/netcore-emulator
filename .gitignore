@@ -1,6 +1,8 @@
 .gradle/
 build/
 logs/
+data/
+captures/
 out/
 .idea/
 *.iml

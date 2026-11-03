@@ -29,6 +29,12 @@
     ],
     "maxUnknownPacketsPerSession": 32,
     "maxMalformedPacketsPerSession": 8,
+    "rateLimit": {
+      "enabled": true,
+      "packetsPerSecond": 200,
+      "burst": 400,
+      "maxViolations": 10
+    },
     "encryption": {
       "enabled": false,
       "keyHex": ""
@@ -41,6 +47,34 @@
     "logUnknownOpcodes": true,
     "consoleEnabled": true,
     "heartbeatIntervalSeconds": 30,
-    "maintenanceIntervalSeconds": 5
+    "maintenanceIntervalSeconds": 5,
+    "tickEnabled": true,
+    "ticksPerSecond": 20,
+    "pluginsEnabled": true,
+    "pluginDirectory": "plugins"
+  },
+  "persistence": {
+    "enabled": true,
+    "directory": "data",
+    "autosaveIntervalSeconds": 60,
+    "namespaces": []
+  },
+  "schemas": {
+    "enabled": true,
+    "directory": "schemas",
+    "hotReload": true,
+    "debounceMillis": 300
+  },
+  "admin": {
+    "enabled": true,
+    "bindAddress": "127.0.0.1",
+    "port": 22180,
+    "allowRemote": false
+  },
+  "capture": {
+    "enabled": false,
+    "directory": "captures",
+    "includePayload": true,
+    "maxBytesPerFrame": 256
   }
 }

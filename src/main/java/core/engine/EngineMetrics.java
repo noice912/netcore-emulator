@@ -8,7 +8,8 @@ public final class EngineMetrics {
     /** Point-in-time copy of all counters. */
     public record Snapshot(long connectionsAccepted, long connectionsRejected, long packetsIn, long bytesIn,
                            long packetsOut, long bytesOut, long packetsHandled, long packetsDropped,
-                           long packetsRejected, long unknownOpcodes, long malformedPackets, long handlerErrors) {
+                           long packetsRejected, long packetsRateLimited, long unknownOpcodes,
+                           long malformedPackets, long handlerErrors) {
     }
 
     private final LongAdder connectionsAccepted = new LongAdder();
@@ -20,6 +21,7 @@ public final class EngineMetrics {
     private final LongAdder packetsHandled = new LongAdder();
     private final LongAdder packetsDropped = new LongAdder();
     private final LongAdder packetsRejected = new LongAdder();
+    private final LongAdder packetsRateLimited = new LongAdder();
     private final LongAdder unknownOpcodes = new LongAdder();
     private final LongAdder malformedPackets = new LongAdder();
     private final LongAdder handlerErrors = new LongAdder();
@@ -54,6 +56,10 @@ public final class EngineMetrics {
         packetsRejected.increment();
     }
 
+    public void packetRateLimited() {
+        packetsRateLimited.increment();
+    }
+
     public void unknownOpcode() {
         unknownOpcodes.increment();
     }
@@ -69,6 +75,6 @@ public final class EngineMetrics {
     public Snapshot snapshot() {
         return new Snapshot(connectionsAccepted.sum(), connectionsRejected.sum(), packetsIn.sum(), bytesIn.sum(),
                 packetsOut.sum(), bytesOut.sum(), packetsHandled.sum(), packetsDropped.sum(), packetsRejected.sum(),
-                unknownOpcodes.sum(), malformedPackets.sum(), handlerErrors.sum());
+                packetsRateLimited.sum(), unknownOpcodes.sum(), malformedPackets.sum(), handlerErrors.sum());
     }
 }

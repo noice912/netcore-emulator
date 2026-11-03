@@ -12,6 +12,8 @@ public enum DispatchResult {
     REJECTED_SESSION_CLOSED,
     /** The handler requires a completed handshake and the session has none. */
     REJECTED_HANDSHAKE_REQUIRED,
+    /** The session exceeded its inbound packet rate; the frame was dropped. */
+    RATE_LIMITED,
     /** The handler (or the packet factory) threw; the error was logged and swallowed. */
     HANDLER_ERROR,
     /** A null session or frame reached the dispatcher. */

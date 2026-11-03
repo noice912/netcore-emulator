@@ -1,0 +1,324 @@
+NETCORE-EMULATOR  -  PROJECT SUMMARY
+=====================================
+
+Version   : 2.0.0 (heavyweight)        Built : 2026-11-03
+Language  : Java 17                    Build : Gradle 9.6 via bundled wrapper (gradlew / gradlew.bat)
+Libraries : Netty 4.1.140 (NIO event loops), Gson 2.13.1 (JSON), SLF4J 2.0 + Logback 1.5 (logging),
+            JUnit 5.14 (tests). Nothing from any existing game-server framework.
+Location  : C:\Users\Joshu\.claude\code\CustomEmulator   (Gradle project / distribution name: netcore-emulator)
+GitHub    : https://github.com/noice912/netcore-emulator
+Code size : 65 main classes (~7,700 lines), 22 test sources (~2,600 lines), 137 tests in 19 test classes, all passing.
+
+
+1. WHAT IT IS
+-------------
+A standalone network protocol emulator engine. It accepts game-client style connections on a
+local machine over TCP ("dispatch") and UDP ("gateway"), frames the bytes into packets, routes each
+packet by opcode to a handler, and answers. Version 1 was the lightweight core (listeners, sessions,
+registry, dispatcher, config). Version 2 turns it into a platform:
+
+  * Packets can be DEFINED IN JSON (schemas/*.json) - layouts, nested structs, arrays - and
+    answered by declarative RESPONSE RULES with ${...} templates. No recompiling to add a packet.
+  * A fixed-rate TICK LOOP for simulation logic.
+  * DISK PERSISTENCE of the in-memory store (atomic JSON snapshots, autosave, restore at boot).
+  * Per-session RATE LIMITING (token bucket) with automatic disconnect of flooders.
+  * PACKET CAPTURE to timestamped hex files for mapping unknown protocols.
+  * A loopback HTTP ADMIN API (status, metrics incl. Prometheus text, sessions, config, schemas,
+    reload, save, capture, kick, broadcast).
+  * A PLUGIN LOADER: drop jars into plugins/, discovered via ServiceLoader, isolated class loaders.
+  * HOT RELOAD of config.json and the schema directory without restarting.
+  * An operator CONSOLE on stdin, plus BROADCAST and KICK operations.
+
+
+2. HOW TO BUILD AND RUN
+-----------------------
+  gradlew.bat build          compile + run all 137 tests
+  gradlew.bat run            start the engine; reads ./config.json, ./schemas/*.json, ./plugins/*.jar
+  gradlew.bat installDist    produces build/install/netcore-emulator/{bin, lib, config.json, schemas/}
+
+Start-up output (defaults):
+  TCP dispatch listener bound on 0.0.0.0:22101
+  UDP gateway listener  bound on 0.0.0.0:22102
+  admin API             http://127.0.0.1:22180/
+  schemas loaded from schemas/: 6 packet(s), 2 struct(s), 3 response rule(s)  (from example.json)
+  tick loop started at 20 ticks/s
+Then the console prompt accepts: status | sessions | mem | config | reload [schemas] | schemas |
+plugins | tick | save | capture on|off | broadcast <text> | kick <id> [reason] | stop
+
+Working directories created at runtime (all git-ignored): data/ (store.json), captures/, logs/.
+
+
+3. ARCHITECTURE (package by package)
+------------------------------------
+core.engine   - lifecycle, configuration, memory, timing
+  ServerEngine        Orchestrates everything (create -> start -> stop). Startup order: restore
+                      persistence, open capture, load plugins (onLoad), load schemas, bind TCP/UDP,
+                      start tick loop + maintenance, start admin API, start config/schema watchers,
+                      plugins onStart. Shutdown reverses it; persistence is flushed last. main() entry.
+  EngineConfig        Gson-mapped immutable snapshot of config.json with defaults for every key,
+                      unknown-key warnings, and validation that reports every problem at once.
+  ConfigManager       Holds the live snapshot, swaps it atomically on reload, keeps the old one if
+                      the new file is broken, notifies ConfigChangeListeners.
+  FileWatcher         Debounced WatchService watcher used for config.json and the schema directory.
+  MemoryStore         Thread-safe namespaced key/value store with typed reads, counters, and a
+                      modification counter used for dirty tracking.
+  PersistentStore     Saves the MemoryStore to data/store.json with type tags (long/double/bool/
+                      string/json), atomic temp-file+rename writes, saveIfDirty, restore at boot.
+  TickScheduler       Dedicated "engine-tick" thread, fixed period, per-tick stats (last/avg/max
+                      microseconds, overruns), resynchronises instead of burst-firing after stalls.
+  Tickable            Interface for per-tick work.
+  EngineMetrics       Lock-free LongAdder counters + Snapshot record.
+  EngineStatus        Structured status record (listeners, sessions, metrics, tick, schemas,
+                      capture, memory, persistence, plugins) serialised by the admin API.
+  ServerConsole       Stdin command loop.
+  ConfigException, ConfigChangeListener
+
+core.network  - transports, sessions, wire format
+  TcpDispatchServer   Netty ServerBootstrap on 0.0.0.0 (configurable). Pipeline per connection:
+                      IdleStateHandler -> FrameDecoder -> FrameEncoder -> TcpSessionHandler.
+  UdpGatewayServer    Netty datagram channel; one frame per datagram; sessions keyed by sender
+                      address+port; with requireHandshake only handshake-free opcodes may open a
+                      session from an unknown endpoint.
+  TcpSessionHandler   Opens the session on channelActive, enforces the handshake deadline, feeds
+                      frames to the dispatcher, closes on idle timeout / decoder error / IOException
+                      / peer disconnect without ever rethrowing into the event loop.
+  NetworkSession      One client endpoint, transport-agnostic. Atomic CONNECTED -> AUTHENTICATED ->
+                      CLOSED state machine (closes exactly once), counters, attributes map, inbound
+                      token bucket, send() / sendAndClose() / close(), View record for JSON.
+  SessionManager      ConcurrentHashMap pool indexed by id and by (protocol, endpoint). Enforces
+                      maxSessions, maxSessionsPerAddress (atomically) and loopbackOnly; tracks
+                      loopback sessions; closeIdle, closeAll, broadcast(packet[, filter]), listeners.
+  SessionTransport    Interface implemented by TcpTransport (channel) and UdpTransport (datagrams).
+  Frame / FrameCodec  The wire unit and its codec (see section 4), including the XOR cipher.
+  FrameDecoder/Encoder Netty ByteToMessageDecoder / MessageToByteEncoder around FrameCodec.
+  TokenBucket         Thread-safe continuous-refill bucket (rate limiting).
+  PacketRecorder      Capture-to-file; one volatile read when idle, synchronised buffered writes
+                      when recording; flushed by the maintenance task.
+  Protocol, SessionKey, SessionListener, NetworkListener
+
+core.handlers - packet model and routing
+  BasePacket          Abstract packet: 16-bit opcode, decode(ByteBuf)/encode(ByteBuf), guarded
+                      read helpers that turn short payloads into PacketDecodeException, bounded
+                      strings (8 KiB) and blobs (1 MiB).
+  PacketHandler<T>    execute(session, packet); requiresHandshake() flag; type token for checks.
+  PacketRegistry      ConcurrentHashMap<Integer, Registration>: register / replace / unregister /
+                      lookup. Every registration is probed once so a factory/handler mismatch fails
+                      at registration, not on live traffic.
+  PacketDispatcher    The guarded path from bytes to code: null checks -> capture -> closed-session
+                      check -> rate limit -> opcode lookup -> handshake gate -> factory -> decode ->
+                      runtime type check -> handler. Every failure is counted, logged and contained;
+                      only VirtualMachineError is rethrown. Abusive sessions are closed on limits.
+  DispatchResult      HANDLED, UNKNOWN_OPCODE, MALFORMED, REJECTED_SESSION_CLOSED,
+                      REJECTED_HANDSHAKE_REQUIRED, RATE_LIMITED, HANDLER_ERROR, DROPPED_NULL
+  builtin/            Opcodes, HandshakeRequest/ResponsePacket (wire messages only), Ping/Pong,
+                      Disconnect, Echo packets and their handlers; BuiltinHandlers registers
+                      PING, DISCONNECT, ECHO.
+
+core.schema   - JSON-defined packets
+  SchemaLoader        Parses schemas/*.json (lenient JSON), merges files, validates (unique names
+                      and opcodes, reserved range, field types, struct references, struct cycles,
+                      response-rule targets and fields), collecting all problems into one message.
+  SchemaSet           Immutable validated set: structs, packets (by name and opcode), rules.
+  FieldType/FieldDef/StructDef/PacketDef/ResponseRule   The model.
+  SchemaPacket        A BasePacket whose layout is a PacketDef; walks fields to encode/decode;
+                      values map (Long/Double/Boolean/String/byte[]/Map/List); dotted-path get(),
+                      typed getters, set() with coercion and range checks.
+  SchemaValues        JSON->model conversion, defaults, coercion, path lookup, display.
+  TemplateEvaluator   ${request.path}, ${session.*}, ${now.*}, ${random.*} resolution; whole-string
+                      placeholders keep their type, embedded ones stringify; recursive for maps/lists.
+  SchemaHandler       Registered per schema packet: notifies SchemaListeners, then applies rules.
+  SchemaManager       Owns the live SchemaSet, (re)registers packets in the PacketRegistry, never
+                      overrides Java-owned opcodes, keeps the previous set if a reload fails,
+                      watches the directory, exposes build(name) for Java callers.
+
+core.admin
+  AdminHttpServer     JDK com.sun.net.httpserver based API (see section 8). Loopback by default;
+                      config refuses a non-loopback bind unless admin.allowRemote=true.
+
+core.plugin
+  EnginePlugin        name/version/onLoad/onStart/onStop.
+  PluginManager       ServiceLoader on the classpath and on each plugins/*.jar (own URLClassLoader);
+                      every lifecycle call is isolated per plugin.
+
+
+4. WIRE FORMAT
+--------------
+  offset size field
+  0      2    magic   0x4E45 ("NE")
+  2      2    opcode  unsigned 16-bit
+  4      4    length  unsigned 32-bit payload length, bounded by config (TCP 64 KiB, UDP 1400 default)
+  8      n    payload
+All integers big-endian. Strings: u16 length + UTF-8. Blobs: u32 length + bytes.
+TCP concatenates frames on the stream; UDP carries exactly one frame per datagram.
+With security.encryption.enabled, payload bytes (never the header) are XOR-ed with the rolling key.
+Reserved opcodes: 0x0001 handshake request, 0x0002 handshake response, 0x0003 PING, 0x0004 PONG,
+0x0005 DISCONNECT, 0x0006 ECHO; everything up to 0x00FF is reserved. Schemas/plugins use >= 0x0100.
+
+
+5. PACKET ROUTING AND SAFETY
+----------------------------
+Per inbound frame the dispatcher: records bytes/metrics -> writes the capture line (if recording)
+-> drops if the session is closed -> consumes a token (RATE_LIMITED if empty; session closed after
+maxViolations) -> looks up the opcode (UNKNOWN_OPCODE, logged with a hex head, closed after
+maxUnknownPacketsPerSession) -> enforces the handshake gate (REJECTED_HANDSHAKE_REQUIRED, closes)
+-> instantiates via the registered factory (type and opcode verified) -> decodes (MALFORMED on
+PacketDecodeException / index errors, closed after maxMalformedPacketsPerSession) -> invokes the
+handler inside a catch-all (HANDLER_ERROR). The network event loop never sees an exception.
+
+
+6. SESSIONS AND LISTENERS
+-------------------------
+A session is created per connection (TCP) or per first datagram (UDP). Admission checks run
+atomically: global cap, per-address cap, loopbackOnly. Loopback sessions are flagged and counted.
+TCP sessions close on idle timeout (IdleStateHandler), handshake timeout, protocol violations,
+decoder errors, connection reset, or DISCONNECT. UDP sessions are reaped by the maintenance task
+after gateway.sessionTimeoutSeconds of silence. sendAndClose() writes a farewell frame and closes
+after the write completes. Listener bind address/port changes in config.json rebind only the
+affected listener; disabling one stops it. port: 0 picks an ephemeral port (used by the tests).
+
+
+7. SCHEMA-DRIVEN PACKETS
+------------------------
+schemas/*.json may contain "structs", "packets" and "responses". Field types:
+  u8 i8 u16 i16 u32 i32 i64 f32 f64 bool string bytes struct array
+  struct fields name a struct; array fields name an "element" type (and "struct" when the element
+  is a struct); nested arrays are expressed through a struct.
+Opcodes may be decimal or "0x0100" strings; "requiresHandshake": false lets a packet through before
+authentication. Response rules: { "on": "Req", "send": "Rsp", "fields": {...}, "closeAfter": false }.
+Templates: constants of any JSON type, "${request.<dotted.path>}", "${session.id}",
+"${session.remote}", "${session.address}", "${session.port}", "${session.protocol}",
+"${session.protocolVersion}", "${session.loopback}", "${session.packetsIn}", "${session.openedAt}",
+"${now.millis}", "${now.seconds}", "${now.iso}", "${random.int}", "${random.long}", "${random.uuid}".
+Editing a file re-registers packets within schemas.debounceMillis. A broken file is rejected with
+every problem listed and the previous packets stay registered. Java code hooks in with
+engine.schemas().addListener(...) and engine.schemas().build("Name").set(...).
+schemas/example.json ships a sample protocol (HelloRequest/Response, MoveRequest/Ack,
+InventoryRequest/Response) with three response rules.
+
+
+8. OPERATIONS: CONSOLE, ADMIN API, CAPTURE
+------------------------------------------
+Console: status (full report), sessions, mem, config, reload, reload schemas, schemas, plugins,
+tick, save, capture on|off, broadcast <text> (ECHO to every open session), kick <id> [reason]
+(DISCONNECT then close), stop.
+
+Admin API (http://127.0.0.1:22180 by default, unauthenticated, loopback-only unless allowRemote):
+  GET  /              endpoint index
+  GET  /status        EngineStatus JSON        GET /metrics  counters JSON
+  GET  /metrics/prometheus   text exposition (netcore_* gauges/counters)
+  GET  /sessions /config /schemas /plugins /tick /memory
+  POST /reload  /schemas/reload  /save  /capture/start  /capture/stop
+  POST /sessions/{id}/kick?reason=...   POST /broadcast?text=...
+  405 with Allow header for other methods, 404 for unknown paths, 409 when persistence is off.
+
+Capture: captures/capture-<UTC timestamp>.log, one line per frame:
+  <ISO time> IN|OUT #<session> <TCP|UDP> <remote> op=0x.... len=N hex=<first maxBytesPerFrame bytes>
+Costs one volatile read per packet when off.
+
+
+9. TICK LOOP, PERSISTENCE, PLUGINS
+----------------------------------
+Tick loop: engine.ticksPerSecond (default 20, 1..1000, changeable live). Tickables run in
+registration order on the "engine-tick" thread; a throwing tickable is logged and the rest still
+run. Stats: tick count, last/average/max microseconds, overruns.
+Persistence: persistence.enabled (default true) -> data/store.json. Restored before plugins load so
+they can read it. Saved by autosave (every 60 s if dirty), console/API "save", and at shutdown.
+Supported value types: Integer/Long/Short/Byte -> Long, Float/Double -> Double, Boolean, String,
+Gson JsonElement / Map / Collection -> JsonElement. Others are skipped with a warning.
+Plugins: engine.pluginsEnabled (default true), engine.pluginDirectory (default plugins/).
+A jar lists its EnginePlugin in META-INF/services/core.plugin.EnginePlugin. onLoad typically
+registers packets, tickables, session or schema listeners through the ServerEngine accessors.
+
+
+10. CONFIGURATION (config.json)
+-------------------------------
+Every key is optional; defaults in brackets.
+network    : bindAddress [0.0.0.0], loopbackOnly [false], maxSessions [1024], maxSessionsPerAddress [16]
+  dispatch : enabled [true], bindAddress [""=inherit], port [22101], backlog [128],
+             idleTimeoutSeconds [90], maxPayloadBytes [65536]
+  gateway  : enabled [true], bindAddress [""], port [22102], sessionTimeoutSeconds [60],
+             maxPayloadBytes [1400], socketBufferBytes [1048576]
+security   : requireHandshake [false], handshakeTimeoutSeconds [10], allowedProtocolVersions [[1]],
+             maxUnknownPacketsPerSession [32], maxMalformedPacketsPerSession [8]
+  rateLimit: enabled [true], packetsPerSecond [200], burst [400], maxViolations [10]
+  encryption: enabled [false], keyHex [""]
+engine     : workerThreads [0=auto], configWatchEnabled [true], configWatchDebounceMillis [300],
+             logUnknownOpcodes [true], consoleEnabled [true], heartbeatIntervalSeconds [30],
+             maintenanceIntervalSeconds [5], tickEnabled [true], ticksPerSecond [20],
+             pluginsEnabled [true], pluginDirectory [plugins]
+persistence: enabled [true], directory [data], autosaveIntervalSeconds [60], namespaces [[]=all]
+schemas    : enabled [true], directory [schemas], hotReload [true], debounceMillis [300]
+admin      : enabled [true], bindAddress [127.0.0.1], port [22180], allowRemote [false]
+capture    : enabled [false], directory [captures], includePayload [true], maxBytesPerFrame [256]
+
+
+11. HOT RELOAD BEHAVIOUR
+------------------------
+Applied live: listener enable/disable and bind address/port (rebind), rate limits, payload size
+limits, encryption toggle/key, tick rate and tick enable, capture enable, admin API
+enable/bind, config and schema watchers, maintenance interval, abuse limits, unknown-opcode logging.
+Logged as "restart required": workerThreads, plugin settings, persistence location/enablement,
+schema directory/enablement, capture directory. Idle timeouts apply to new connections.
+A reload that fails validation leaves the running configuration untouched.
+
+
+12. TEST SUITE (137 tests, 19 classes, all passing)
+---------------------------------------------------
+core.network   FrameCodecTest (7), SessionManagerTest (9), TokenBucketTest (4), PacketRecorderTest (3)
+core.handlers  PacketRegistryTest (7), PacketDispatcherTest (13: handled/echo/unknown/malformed/null/
+               closed/handshake gate/authenticated/unknown-limit/canOpenSession/disconnect/
+               rate limit/rate limit disabled)
+core.engine    EngineConfigTest (14), ConfigManagerTest (6 incl. live file-watcher reload),
+               MemoryStoreTest (9), TickSchedulerTest (6), PersistentStoreTest (7)
+core.schema    SchemaPacketTest (7, every field type round-trips), SchemaLoaderTest (10),
+               SchemaManagerTest (9), TemplateEvaluatorTest (6)
+core.admin     AdminHttpServerTest (8, real HTTP client against a live engine)
+core.plugin    PluginManagerTest (3, classpath plugin through the full lifecycle)
+core.integration LoopbackIntegrationTest (6: TCP echo/ping/disconnect, UDP echo, encrypted TCP,
+               status), SchemaIntegrationTest (3: rule-driven reply over TCP, struct round trip
+               over UDP, hot reload of a schema file)
+Test support   CapturingTransport (in-memory SessionTransport), Frames (wire helpers), TestPlugin.
+Integration tests bind real sockets on 127.0.0.1 ephemeral ports; Netty leak detection runs at
+"paranoid" during tests.
+
+
+13. DESIGN DECISIONS AND KNOWN LIMITS
+-------------------------------------
+* Handshake credential validation is intentionally not shipped. The lifecycle (state machine,
+  deadline, dispatcher gate, request/response packets) is built in; the check itself depends on
+  the protocol being emulated. README explains how to register one. requireHandshake therefore
+  defaults to false so the engine is usable out of the box.
+* The admin API is unauthenticated; it binds to loopback and the configuration refuses any other
+  address without admin.allowRemote=true.
+* Handlers and schema rules run on the Netty event-loop thread of the connection; slow work must
+  be offloaded. UDP traffic is handled by a single event loop (one datagram channel).
+* The engine never contacts any external server; it only listens.
+* Persisted values are limited to the types listed in section 9.
+* Nested arrays in schemas go through a struct; struct nesting depth is capped at 8, arrays at
+  65,535 elements, strings at 8 KiB, blobs at 1 MiB.
+* The on-disk folder is still named CustomEmulator; the Gradle project, jar, distribution and
+  banner are named netcore-emulator to match the GitHub repository.
+
+
+14. VERSION HISTORY
+-------------------
+1.0.0  Core engine: Netty TCP/UDP listeners on 0.0.0.0, NetworkSession + SessionManager,
+       BasePacket/PacketHandler/PacketRegistry/PacketDispatcher, Gson EngineConfig with hot reload,
+       MemoryStore, metrics, console, built-in ping/pong/disconnect/echo, 68 tests.
+       Committed as 672844d and pushed to github.com/noice912/netcore-emulator.
+2.0.0  Heavyweight: JSON schema packets + response rules + templates, tick loop, persistence,
+       rate limiting, packet capture, admin HTTP API with Prometheus metrics, plugin loader,
+       broadcast/kick, structured status, expanded console, 137 tests. (This working tree.)
+
+
+15. FILE INVENTORY
+------------------
+build.gradle, settings.gradle, gradlew, gradlew.bat, gradle/wrapper/*, .gitignore, .gitattributes
+config.json              default configuration (every section)
+schemas/example.json     sample protocol
+README.md                user documentation
+SUMMARY.txt              this file
+src/main/java/core/{engine,network,handlers,handlers/builtin,schema,admin,plugin}/*.java
+src/main/resources/logback.xml            console + rolling file logging (logs/engine.log)
+src/test/java/core/{engine,network,handlers,schema,admin,plugin,integration,support}/*.java
+src/test/resources/logback-test.xml, META-INF/services/core.plugin.EnginePlugin

@@ -1,9 +1,9 @@
 /*
- * CustomEmulator - a lightweight TCP/UDP protocol emulator engine.
+ * netcore-emulator - a TCP/UDP protocol emulator engine.
  *
  *   ./gradlew build        compile + run the test suite
- *   ./gradlew run          start the engine (reads ./config.json)
- *   ./gradlew installDist  produce build/install/CustomEmulator/{bin,lib}
+ *   ./gradlew run          start the engine (reads ./config.json, ./schemas, ./plugins)
+ *   ./gradlew installDist  produce build/install/netcore-emulator/{bin,lib,config.json,schemas}
  */
 plugins {
     id 'java'
@@ -11,7 +11,7 @@ plugins {
 }
 
 group = 'core'
-version = '1.0.0'
+version = '2.0.0'
 
 java {
     sourceCompatibility = JavaVersion.VERSION_17
@@ -65,11 +65,14 @@ tasks.named('test') {
     }
 }
 
-// Ship the default config next to the start scripts.
+// Ship the default config and the example schema next to the start scripts.
 distributions {
     main {
         contents {
             from('config.json')
+            from('schemas') {
+                into 'schemas'
+            }
         }
     }
 }

@@ -4,6 +4,7 @@ import core.engine.EngineConfig;
 import core.engine.EngineMetrics;
 import core.network.Frame;
 import core.network.NetworkSession;
+import core.network.PacketRecorder;
 import io.netty.buffer.ByteBuf;
 import io.netty.buffer.ByteBufUtil;
 import org.slf4j.Logger;
@@ -16,13 +17,14 @@ import java.util.function.Supplier;
  * Routes inbound frames to their registered handler.
  *
  * <p>This is the boundary between untrusted bytes and engine code, so every step is guarded: null
- * inputs are dropped, unknown opcodes are counted and logged, payloads that fail to decode are
- * reported as malformed, the packet instance is type-checked against the handler, and any
- * exception a handler throws is logged instead of propagating into the network event loop.
- * Only JVM-fatal errors ({@link VirtualMachineError}) are rethrown.
+ * inputs are dropped, flooding sessions are throttled by a per-session token bucket, unknown
+ * opcodes are counted and logged, payloads that fail to decode are reported as malformed, the
+ * packet instance is type-checked against the handler, and any exception a handler throws is
+ * logged instead of propagating into the network event loop. Only JVM-fatal errors
+ * ({@link VirtualMachineError}) are rethrown.
  *
- * <p>A session that keeps sending unknown or malformed traffic is closed once it crosses the
- * per-session limits in the security section of the configuration.
+ * <p>A session that keeps sending unknown, malformed or excessive traffic is closed once it
+ * crosses the per-session limits in the security section of the configuration.
  */
 public final class PacketDispatcher {
 
@@ -32,6 +34,7 @@ public final class PacketDispatcher {
     private final PacketRegistry registry;
     private final Supplier<EngineConfig> config;
     private final EngineMetrics metrics;
+    private volatile PacketRecorder recorder;
 
     public PacketDispatcher(PacketRegistry registry, Supplier<EngineConfig> config, EngineMetrics metrics) {
         this.registry = Objects.requireNonNull(registry, "registry");
@@ -41,6 +44,11 @@ public final class PacketDispatcher {
 
     public PacketRegistry registry() {
         return registry;
+    }
+
+    /** Attach (or detach with {@code null}) a recorder that sees every inbound frame. */
+    public void setRecorder(PacketRecorder recorder) {
+        this.recorder = recorder;
     }
 
     /**
@@ -68,6 +76,11 @@ public final class PacketDispatcher {
         session.recordInbound(length);
         metrics.packetIn(length);
 
+        PacketRecorder rec = recorder;
+        if (rec != null) {
+            rec.record(PacketRecorder.Direction.IN, session, opcode, payload);
+        }
+
         if (!session.isOpen()) {
             log.debug("session {} is closed; dropping opcode 0x{}", session.id(), hex(opcode));
             metrics.packetDropped();
@@ -75,6 +88,11 @@ public final class PacketDispatcher {
         }
 
         EngineConfig cfg = config.get();
+        EngineConfig.RateLimit limit = cfg.security().rateLimit();
+        if (limit.enabled() && !session.tryAdmitInbound(limit.packetsPerSecond(), limit.burst())) {
+            return onRateLimited(session, opcode, limit);
+        }
+
         PacketRegistry.Registration<?> registration = registry.lookup(opcode).orElse(null);
         if (registration == null) {
             return onUnknownOpcode(session, opcode, payload, cfg);
@@ -121,6 +139,20 @@ public final class PacketDispatcher {
                     session.id(), session.remoteAddress(), t);
             return DispatchResult.HANDLER_ERROR;
         }
+    }
+
+    private DispatchResult onRateLimited(NetworkSession session, int opcode, EngineConfig.RateLimit limit) {
+        int count = session.recordRateLimitViolation();
+        metrics.packetRateLimited();
+        if (count == 1 || count % 100 == 0) {
+            log.warn("session {} ({}) exceeded the inbound rate limit ({} pkt/s, burst {}); dropped opcode 0x{} "
+                    + "(violation #{})", session.id(), session.remoteAddress(), limit.packetsPerSecond(),
+                    limit.burst(), hex(opcode), count);
+        }
+        if (limit.maxViolations() > 0 && count > limit.maxViolations()) {
+            session.close("flood: inbound rate limit exceeded " + count + " times");
+        }
+        return DispatchResult.RATE_LIMITED;
     }
 
     private DispatchResult onUnknownOpcode(NetworkSession session, int opcode, ByteBuf payload, EngineConfig cfg) {

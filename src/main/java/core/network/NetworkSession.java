@@ -34,6 +34,13 @@ public final class NetworkSession {
         CLOSED
     }
 
+    /** Serializable snapshot for status views and the admin API. */
+    public record View(long id, String protocol, String remote, boolean loopback, String state,
+                       int protocolVersion, long openedAtMillis, long idleMillis, long packetsIn, long packetsOut,
+                       long bytesIn, long bytesOut, int unknownPackets, int malformedPackets,
+                       int rateLimitViolations) {
+    }
+
     private static final Logger log = LoggerFactory.getLogger(NetworkSession.class);
 
     private final long id;
@@ -49,6 +56,7 @@ public final class NetworkSession {
     private volatile int protocolVersion = -1;
     private volatile String clientToken = "";
     private volatile String closeReason;
+    private volatile TokenBucket inboundBucket;
 
     private final ConcurrentHashMap<String, Object> attributes = new ConcurrentHashMap<>();
     private final LongAdder packetsIn = new LongAdder();
@@ -57,6 +65,7 @@ public final class NetworkSession {
     private final LongAdder bytesOut = new LongAdder();
     private final AtomicInteger unknownPackets = new AtomicInteger();
     private final AtomicInteger malformedPackets = new AtomicInteger();
+    private final AtomicInteger rateLimitViolations = new AtomicInteger();
 
     NetworkSession(long id, Protocol protocol, InetSocketAddress remoteAddress, SessionTransport transport,
                    SessionManager manager) {
@@ -134,7 +143,7 @@ public final class NetworkSession {
         return true;
     }
 
-    // ---- activity & counters --------------------------------------------------------------------
+    // ---- activity, counters & flood control -----------------------------------------------------
 
     public void touch() {
         lastActivityMillis = System.currentTimeMillis();
@@ -157,6 +166,7 @@ public final class NetworkSession {
     void recordOutbound(int bytes) {
         packetsOut.increment();
         bytesOut.add(bytes);
+        manager.metrics().packetOut(bytes);
     }
 
     public int recordUnknownPacket() {
@@ -165,6 +175,30 @@ public final class NetworkSession {
 
     public int recordMalformedPacket() {
         return malformedPackets.incrementAndGet();
+    }
+
+    /**
+     * Admit one inbound packet against this session's token bucket. The bucket is created on first
+     * use and re-configured in place when the limits change, so a config reload applies live.
+     */
+    public boolean tryAdmitInbound(double packetsPerSecond, double burst) {
+        TokenBucket bucket = inboundBucket;
+        if (bucket == null) {
+            synchronized (this) {
+                bucket = inboundBucket;
+                if (bucket == null) {
+                    bucket = new TokenBucket(packetsPerSecond, burst);
+                    inboundBucket = bucket;
+                }
+            }
+        } else if (bucket.ratePerSecond() != packetsPerSecond || bucket.capacity() != burst) {
+            bucket.reconfigure(packetsPerSecond, burst);
+        }
+        return bucket.tryAcquire();
+    }
+
+    public int recordRateLimitViolation() {
+        return rateLimitViolations.incrementAndGet();
     }
 
     public long packetsIn() {
@@ -189,6 +223,17 @@ public final class NetworkSession {
 
     public int malformedPackets() {
         return malformedPackets.get();
+    }
+
+    public int rateLimitViolations() {
+        return rateLimitViolations.get();
+    }
+
+    /** Point-in-time, JSON-friendly snapshot. */
+    public View view() {
+        return new View(id, protocol.name(), remoteAddress.toString(), loopback, state.get().name(), protocolVersion,
+                openedAtMillis, idleMillis(), packetsIn.sum(), packetsOut.sum(), bytesIn.sum(), bytesOut.sum(),
+                unknownPackets.get(), malformedPackets.get(), rateLimitViolations.get());
     }
 
     // ---- attributes -----------------------------------------------------------------------------
@@ -260,6 +305,10 @@ public final class NetworkSession {
 
     private boolean write(Frame frame, boolean closeAfterWrite, BasePacket packet) {
         int length = frame.payloadLength();
+        PacketRecorder recorder = manager.recorderOrNull();
+        if (recorder != null) {
+            recorder.record(PacketRecorder.Direction.OUT, this, frame.opcode(), frame.content());
+        }
         try {
             transport.send(frame, closeAfterWrite);
         } catch (RuntimeException e) {

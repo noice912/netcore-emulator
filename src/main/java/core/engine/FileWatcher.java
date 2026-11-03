@@ -5,26 +5,28 @@ import org.slf4j.LoggerFactory;
 
 import java.io.IOException;
 import java.nio.file.ClosedWatchServiceException;
+import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.StandardWatchEventKinds;
 import java.nio.file.WatchEvent;
 import java.nio.file.WatchKey;
 import java.nio.file.WatchService;
 import java.util.Objects;
+import java.util.function.Predicate;
 
 /**
- * Watches one file's directory and runs a callback after the file is created, modified or
- * replaced. Editors typically save in several steps (truncate, write, rename), so events are
+ * Watches one directory and runs a callback after a matching file is created, modified or
+ * deleted. Editors typically save in several steps (truncate, write, rename), so events are
  * debounced: after the first relevant event the watcher waits briefly, discards the rest of the
- * burst, then fires once.
+ * burst, then fires once. Used for {@code config.json} and the schema directory.
  */
-final class ConfigWatcher implements AutoCloseable {
+public final class FileWatcher implements AutoCloseable {
 
-    private static final Logger log = LoggerFactory.getLogger(ConfigWatcher.class);
+    private static final Logger log = LoggerFactory.getLogger(FileWatcher.class);
 
-    private final Path file;
+    private final String threadName;
     private final Path directory;
-    private final String fileName;
+    private final Predicate<String> fileNameFilter;
     private final long debounceMillis;
     private final Runnable onChange;
 
@@ -32,27 +34,32 @@ final class ConfigWatcher implements AutoCloseable {
     private WatchService watchService;
     private Thread thread;
 
-    ConfigWatcher(Path file, long debounceMillis, Runnable onChange) {
-        this.file = Objects.requireNonNull(file, "file").toAbsolutePath();
-        Path parent = this.file.getParent();
-        this.directory = parent != null ? parent : this.file.getFileSystem().getPath(".").toAbsolutePath();
-        this.fileName = this.file.getFileName().toString();
+    public FileWatcher(String threadName, Path directory, Predicate<String> fileNameFilter, long debounceMillis,
+                       Runnable onChange) {
+        this.threadName = Objects.requireNonNull(threadName, "threadName");
+        this.directory = Objects.requireNonNull(directory, "directory").toAbsolutePath();
+        this.fileNameFilter = Objects.requireNonNull(fileNameFilter, "fileNameFilter");
         this.debounceMillis = Math.max(0, debounceMillis);
         this.onChange = Objects.requireNonNull(onChange, "onChange");
     }
 
-    synchronized void start() throws IOException {
+    public synchronized void start() throws IOException {
         if (running) {
             return;
         }
-        watchService = file.getFileSystem().newWatchService();
+        Files.createDirectories(directory);
+        watchService = directory.getFileSystem().newWatchService();
         directory.register(watchService, StandardWatchEventKinds.ENTRY_CREATE,
                 StandardWatchEventKinds.ENTRY_MODIFY, StandardWatchEventKinds.ENTRY_DELETE);
         running = true;
-        thread = new Thread(this::loop, "config-watcher");
+        thread = new Thread(this::loop, threadName);
         thread.setDaemon(true);
         thread.start();
-        log.info("watching {} for changes", file);
+        log.info("watching {} for changes", directory);
+    }
+
+    public boolean isRunning() {
+        return running;
     }
 
     private void loop() {
@@ -73,7 +80,8 @@ final class ConfigWatcher implements AutoCloseable {
                     relevant = true; // events were lost; assume ours was among them
                     continue;
                 }
-                if (event.context() instanceof Path changed && fileName.equals(changed.getFileName().toString())) {
+                if (event.context() instanceof Path changed
+                        && fileNameFilter.test(changed.getFileName().toString())) {
                     relevant = true;
                 }
             }
@@ -84,11 +92,11 @@ final class ConfigWatcher implements AutoCloseable {
                 try {
                     onChange.run();
                 } catch (RuntimeException e) {
-                    log.error("config change callback failed", e);
+                    log.error("change callback for {} failed", directory, e);
                 }
             }
             if (!valid) {
-                log.warn("{} is no longer watchable; config watcher stopped", directory);
+                log.warn("{} is no longer watchable; watcher stopped", directory);
                 return;
             }
         }
@@ -133,6 +141,6 @@ final class ConfigWatcher implements AutoCloseable {
         } catch (InterruptedException e) {
             Thread.currentThread().interrupt();
         }
-        log.info("stopped watching {}", file);
+        log.info("stopped watching {}", directory);
     }
 }

@@ -31,7 +31,7 @@ public final class ConfigManager implements AutoCloseable {
     private final CopyOnWriteArrayList<ConfigChangeListener> listeners = new CopyOnWriteArrayList<>();
     private final Object reloadLock = new Object();
     private volatile EngineConfig current;
-    private ConfigWatcher watcher;
+    private FileWatcher watcher;
 
     private ConfigManager(Path path, EngineConfig initial) {
         this.path = path;
@@ -102,7 +102,11 @@ public final class ConfigManager implements AutoCloseable {
         if (watcher != null) {
             return;
         }
-        ConfigWatcher created = new ConfigWatcher(path, debounceMillis, this::reload);
+        Path absolute = path.toAbsolutePath();
+        Path directory = absolute.getParent() != null ? absolute.getParent() : absolute.getFileSystem().getPath(".");
+        String fileName = absolute.getFileName().toString();
+        FileWatcher created = new FileWatcher("config-watcher", directory, fileName::equals, debounceMillis,
+                this::reload);
         created.start();
         watcher = created;
     }

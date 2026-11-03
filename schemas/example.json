@@ -1,0 +1,102 @@
+{
+  "structs": {
+    "Vec3": [
+      { "name": "x", "type": "f32" },
+      { "name": "y", "type": "f32" },
+      { "name": "z", "type": "f32" }
+    ],
+    "ItemStack": [
+      { "name": "itemId", "type": "u32" },
+      { "name": "count", "type": "u16" }
+    ]
+  },
+  "packets": [
+    {
+      "name": "HelloRequest",
+      "opcode": "0x0100",
+      "description": "First packet a client sends: who it is and which build it runs.",
+      "fields": [
+        { "name": "clientName", "type": "string" },
+        { "name": "clientBuild", "type": "u32" }
+      ]
+    },
+    {
+      "name": "HelloResponse",
+      "opcode": "0x0101",
+      "description": "Greeting carrying the session id the engine assigned.",
+      "fields": [
+        { "name": "retcode", "type": "i32" },
+        { "name": "sessionId", "type": "i64" },
+        { "name": "serverTimeMillis", "type": "i64" },
+        { "name": "message", "type": "string" }
+      ]
+    },
+    {
+      "name": "MoveRequest",
+      "opcode": "0x0110",
+      "description": "Client reports a new position and the path it intends to follow.",
+      "fields": [
+        { "name": "entityId", "type": "u32" },
+        { "name": "position", "type": "struct", "struct": "Vec3" },
+        { "name": "waypoints", "type": "array", "element": "struct", "struct": "Vec3" }
+      ]
+    },
+    {
+      "name": "MoveAck",
+      "opcode": "0x0111",
+      "fields": [
+        { "name": "entityId", "type": "u32" },
+        { "name": "position", "type": "struct", "struct": "Vec3" },
+        { "name": "accepted", "type": "bool" }
+      ]
+    },
+    {
+      "name": "InventoryRequest",
+      "opcode": "0x0120",
+      "fields": []
+    },
+    {
+      "name": "InventoryResponse",
+      "opcode": "0x0121",
+      "fields": [
+        { "name": "items", "type": "array", "element": "struct", "struct": "ItemStack" },
+        { "name": "capacity", "type": "u16" }
+      ]
+    }
+  ],
+  "responses": [
+    {
+      "on": "HelloRequest",
+      "send": "HelloResponse",
+      "description": "Greet every client and hand it the engine session id.",
+      "fields": {
+        "retcode": 0,
+        "sessionId": "${session.id}",
+        "serverTimeMillis": "${now.millis}",
+        "message": "Welcome, ${request.clientName} (build ${request.clientBuild})"
+      }
+    },
+    {
+      "on": "MoveRequest",
+      "send": "MoveAck",
+      "description": "Accept every move and echo the reported position back.",
+      "fields": {
+        "entityId": "${request.entityId}",
+        "position": "${request.position}",
+        "accepted": true
+      }
+    },
+    {
+      "on": "InventoryRequest",
+      "send": "InventoryResponse",
+      "description": "Static starter inventory.",
+      "fields": {
+        "items": [
+          { "itemId": 1001, "count": 5 },
+          { "itemId": 2002, "count": 1 }
+        ],
+        "capacity": 30
+      }
+    }
+  ]
+}
