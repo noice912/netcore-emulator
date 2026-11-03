@@ -1,0 +1,167 @@
+package core.handlers;
+
+import core.engine.EngineConfig;
+import core.engine.EngineMetrics;
+import core.network.Frame;
+import core.network.NetworkSession;
+import io.netty.buffer.ByteBuf;
+import io.netty.buffer.ByteBufUtil;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+
+import java.util.Objects;
+import java.util.function.Supplier;
+
+/**
+ * Routes inbound frames to their registered handler.
+ *
+ * <p>This is the boundary between untrusted bytes and engine code, so every step is guarded: null
+ * inputs are dropped, unknown opcodes are counted and logged, payloads that fail to decode are
+ * reported as malformed, the packet instance is type-checked against the handler, and any
+ * exception a handler throws is logged instead of propagating into the network event loop.
+ * Only JVM-fatal errors ({@link VirtualMachineError}) are rethrown.
+ *
+ * <p>A session that keeps sending unknown or malformed traffic is closed once it crosses the
+ * per-session limits in the security section of the configuration.
+ */
+public final class PacketDispatcher {
+
+    private static final Logger log = LoggerFactory.getLogger(PacketDispatcher.class);
+    private static final int DUMP_BYTES = 32;
+
+    private final PacketRegistry registry;
+    private final Supplier<EngineConfig> config;
+    private final EngineMetrics metrics;
+
+    public PacketDispatcher(PacketRegistry registry, Supplier<EngineConfig> config, EngineMetrics metrics) {
+        this.registry = Objects.requireNonNull(registry, "registry");
+        this.config = Objects.requireNonNull(config, "config");
+        this.metrics = Objects.requireNonNull(metrics, "metrics");
+    }
+
+    public PacketRegistry registry() {
+        return registry;
+    }
+
+    /**
+     * Whether a datagram carrying this opcode may open a brand-new session: true only for opcodes
+     * whose handler does not require a handshake (i.e. the handshake itself).
+     */
+    public boolean canOpenSession(int opcode) {
+        return registry.lookup(opcode).map(r -> !r.handler().requiresHandshake()).orElse(false);
+    }
+
+    /**
+     * Decode and execute one frame on behalf of a session. Never throws for bad input or a failing
+     * handler. The caller keeps ownership of the frame and must release it afterwards.
+     */
+    public DispatchResult dispatch(NetworkSession session, Frame frame) {
+        if (session == null || frame == null || frame.content() == null) {
+            metrics.packetDropped();
+            log.warn("dispatcher received a null {}; dropping", session == null ? "session" : "frame");
+            return DispatchResult.DROPPED_NULL;
+        }
+
+        ByteBuf payload = frame.content();
+        int opcode = frame.opcode();
+        int length = payload.readableBytes();
+        session.recordInbound(length);
+        metrics.packetIn(length);
+
+        if (!session.isOpen()) {
+            log.debug("session {} is closed; dropping opcode 0x{}", session.id(), hex(opcode));
+            metrics.packetDropped();
+            return DispatchResult.REJECTED_SESSION_CLOSED;
+        }
+
+        EngineConfig cfg = config.get();
+        PacketRegistry.Registration<?> registration = registry.lookup(opcode).orElse(null);
+        if (registration == null) {
+            return onUnknownOpcode(session, opcode, payload, cfg);
+        }
+
+        if (cfg.security().requireHandshake() && registration.handler().requiresHandshake()
+                && !session.isAuthenticated()) {
+            metrics.packetRejected();
+            log.warn("session {} ({}) sent {} (0x{}) before completing the handshake; closing",
+                    session.id(), session.remoteAddress(), registration.packetType().getSimpleName(), hex(opcode));
+            session.close("protocol violation: packet before handshake");
+            return DispatchResult.REJECTED_HANDSHAKE_REQUIRED;
+        }
+
+        BasePacket packet;
+        try {
+            packet = registration.newPacket();
+        } catch (RuntimeException e) {
+            metrics.handlerError();
+            log.error("packet factory for opcode 0x{} failed", hex(opcode), e);
+            return DispatchResult.HANDLER_ERROR;
+        }
+
+        try {
+            packet.decode(payload);
+        } catch (PacketDecodeException | IndexOutOfBoundsException | IllegalArgumentException
+                 | IllegalStateException e) {
+            return onMalformed(session, registration, payload, e, cfg);
+        }
+        if (payload.isReadable() && log.isDebugEnabled()) {
+            log.debug("session {}: {} left {} trailing byte(s) unread", session.id(), packet,
+                    payload.readableBytes());
+        }
+
+        try {
+            registration.invoke(session, packet);
+            metrics.packetHandled();
+            return DispatchResult.HANDLED;
+        } catch (VirtualMachineError fatal) {
+            throw fatal;
+        } catch (Throwable t) {
+            metrics.handlerError();
+            log.error("handler {} failed on {} from session {} ({})", registration.handler().name(), packet,
+                    session.id(), session.remoteAddress(), t);
+            return DispatchResult.HANDLER_ERROR;
+        }
+    }
+
+    private DispatchResult onUnknownOpcode(NetworkSession session, int opcode, ByteBuf payload, EngineConfig cfg) {
+        int count = session.recordUnknownPacket();
+        metrics.unknownOpcode();
+        if (cfg.engine().logUnknownOpcodes()) {
+            log.warn("session {} ({}) sent unknown opcode 0x{} with {} byte(s){}", session.id(),
+                    session.remoteAddress(), hex(opcode), payload.readableBytes(), headDump(payload));
+        }
+        int limit = cfg.security().maxUnknownPacketsPerSession();
+        if (limit > 0 && count > limit) {
+            session.close("too many unknown opcodes (" + count + ")");
+        }
+        return DispatchResult.UNKNOWN_OPCODE;
+    }
+
+    private DispatchResult onMalformed(NetworkSession session, PacketRegistry.Registration<?> registration,
+                                       ByteBuf payload, Exception cause, EngineConfig cfg) {
+        int count = session.recordMalformedPacket();
+        metrics.malformedPacket();
+        log.warn("session {} ({}) sent malformed {} (0x{}): {}{}", session.id(), session.remoteAddress(),
+                registration.packetType().getSimpleName(), hex(registration.opcode()), cause.getMessage(),
+                headDump(payload));
+        int limit = cfg.security().maxMalformedPacketsPerSession();
+        if (limit > 0 && count > limit) {
+            session.close("too many malformed packets (" + count + ")");
+        }
+        return DispatchResult.MALFORMED;
+    }
+
+    private static String hex(int opcode) {
+        return String.format("%04X", opcode);
+    }
+
+    /** First bytes of the payload (from its start, regardless of reader index) for log lines. */
+    private static String headDump(ByteBuf payload) {
+        int total = payload.writerIndex();
+        if (total == 0) {
+            return "";
+        }
+        int n = Math.min(DUMP_BYTES, total);
+        return " head=" + ByteBufUtil.hexDump(payload, 0, n) + (total > n ? "..." : "");
+    }
+}

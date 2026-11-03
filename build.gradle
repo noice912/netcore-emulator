@@ -1,0 +1,75 @@
+/*
+ * CustomEmulator - a lightweight TCP/UDP protocol emulator engine.
+ *
+ *   ./gradlew build        compile + run the test suite
+ *   ./gradlew run          start the engine (reads ./config.json)
+ *   ./gradlew installDist  produce build/install/CustomEmulator/{bin,lib}
+ */
+plugins {
+    id 'java'
+    id 'application'
+}
+
+group = 'core'
+version = '1.0.0'
+
+java {
+    sourceCompatibility = JavaVersion.VERSION_17
+    targetCompatibility = JavaVersion.VERSION_17
+}
+
+repositories {
+    mavenCentral()
+}
+
+dependencies {
+    // Networking (asynchronous NIO event loops, buffers, codecs).
+    implementation 'io.netty:netty-handler:4.1.140.Final'
+    implementation 'io.netty:netty-codec:4.1.140.Final'
+
+    // External config.json parsing.
+    implementation 'com.google.code.gson:gson:2.13.1'
+
+    // Logging: SLF4J facade, Logback backend (configured in src/main/resources/logback.xml).
+    implementation 'org.slf4j:slf4j-api:2.0.17'
+    runtimeOnly 'ch.qos.logback:logback-classic:1.5.38'
+
+    testImplementation platform('org.junit:junit-bom:5.14.4')
+    testImplementation 'org.junit.jupiter:junit-jupiter'
+    testRuntimeOnly 'org.junit.platform:junit-platform-launcher'
+}
+
+application {
+    mainClass = 'core.engine.ServerEngine'
+}
+
+tasks.withType(JavaCompile).configureEach {
+    options.encoding = 'UTF-8'
+    options.release = 17
+    options.compilerArgs += ['-Xlint:all', '-Xlint:-processing']
+}
+
+tasks.named('run') {
+    // Lets the interactive console (status / reload / stop) read from your terminal.
+    standardInput = System.in
+    workingDir = projectDir
+}
+
+tasks.named('test') {
+    useJUnitPlatform()
+    // Fail loudly on any leaked reference-counted buffer during tests.
+    jvmArgs '-Dio.netty.leakDetection.level=paranoid'
+    testLogging {
+        events 'passed', 'skipped', 'failed'
+        exceptionFormat 'full'
+    }
+}
+
+// Ship the default config next to the start scripts.
+distributions {
+    main {
+        contents {
+            from('config.json')
+        }
+    }
+}

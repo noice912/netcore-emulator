@@ -1,0 +1,46 @@
+{
+  "network": {
+    "bindAddress": "0.0.0.0",
+    "loopbackOnly": false,
+    "maxSessions": 1024,
+    "maxSessionsPerAddress": 16,
+    "dispatch": {
+      "enabled": true,
+      "bindAddress": "",
+      "port": 22101,
+      "backlog": 128,
+      "idleTimeoutSeconds": 90,
+      "maxPayloadBytes": 65536
+    },
+    "gateway": {
+      "enabled": true,
+      "bindAddress": "",
+      "port": 22102,
+      "sessionTimeoutSeconds": 60,
+      "maxPayloadBytes": 1400,
+      "socketBufferBytes": 1048576
+    }
+  },
+  "security": {
+    "requireHandshake": false,
+    "handshakeTimeoutSeconds": 10,
+    "allowedProtocolVersions": [
+      1
+    ],
+    "maxUnknownPacketsPerSession": 32,
+    "maxMalformedPacketsPerSession": 8,
+    "encryption": {
+      "enabled": false,
+      "keyHex": ""
+    }
+  },
+  "engine": {
+    "workerThreads": 0,
+    "configWatchEnabled": true,
+    "configWatchDebounceMillis": 300,
+    "logUnknownOpcodes": true,
+    "consoleEnabled": true,
+    "heartbeatIntervalSeconds": 30,
+    "maintenanceIntervalSeconds": 5
+  }
+}
